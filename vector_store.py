@@ -219,9 +219,11 @@ def semantic_search(
         if fid < 0:
             continue
         row = db.execute(
-            "SELECT text, genre, date, hour FROM segments WHERE faiss_id = ?", (int(fid),)
+            "SELECT text, genre, date, hour, source_file FROM segments WHERE faiss_id = ?", (int(fid),)
         ).fetchone()
         if row:
+            source_file = row["source_file"] or ""
+            _, has_audio = resolve_audio_path(source_file)
             results.append({
                 "text": row["text"],
                 "genre": row["genre"],
@@ -229,6 +231,8 @@ def semantic_search(
                 "hour": row["hour"],
                 "score": float(score),
                 "faiss_id": int(fid),
+                "source_file": source_file,
+                "has_audio": bool(has_audio),
             })
     db.close()
     return results
