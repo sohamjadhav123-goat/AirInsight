@@ -11,6 +11,7 @@ CLI usage:
 """
 
 import argparse
+import csv
 import datetime
 import json
 import logging
@@ -292,6 +293,71 @@ def get_date_range(db_path: str = SQLITE_DB_PATH) -> tuple[Optional[str], Option
     if row and row["min_d"] is not None and row["max_d"] is not None:
         return (row["min_d"], row["max_d"])
     return (None, None)
+
+
+_metadata_audio_cache: Optional[dict[str, str]] = None
+_metadata_cache_mtime: float = 0.0
+
+
+def _load_metadata_audio_map(metadata_csv: str = "output/metadata.csv") -> dict[str, str]:
+    """Load transcript_file -> audio_file mapping from metadata.csv."""
+    global _metadata_audio_cache, _metadata_cache_mtime
+    if not os.path.isfile(metadata_csv):
+        return {}
+    try:
+        mtime = os.path.getmtime(metadata_csv)
+        if _metadata_audio_cache is not None and mtime == _metadata_cache_mtime:
+            return _metadata_audio_cache
+        mapping: dict[str, str] = {}
+        with open(metadata_csv, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                t_file = (row.get("transcript_file") or "").strip().replace("\\", "/")
+                a_file = (row.get("audio_file") or "").strip().replace("\\", "/")
+                if t_file and a_file:
+                    mapping[t_file] = a_file
+        _metadata_audio_cache = mapping
+        _metadata_cache_mtime = mtime
+        return mapping
+    except Exception:
+        return {}
+
+
+def resolve_audio_path(
+    source_file: str,
+    out_dir: str = "output",
+    metadata_csv: str = "output/metadata.csv",
+) -> tuple[str, bool]:
+    """Resolve transcript source_file to its corresponding audio file path.
+
+    Prefers 'audio_file' from metadata_csv if specified and non-empty;
+    otherwise derives path by swapping leading 'text/' -> 'audio/' and '.txt' -> '.mp3'.
+
+    Returns:
+        (resolved_relpath, exists_on_disk)
+    """
+    if not source_file:
+        return ("", False)
+
+    norm_source = source_file.strip().replace("\\", "/")
+
+    # Check metadata CSV first
+    audio_rel = ""
+    meta_map = _load_metadata_audio_map(metadata_csv)
+    if norm_source in meta_map:
+        audio_rel = meta_map[norm_source]
+
+    if not audio_rel:
+        # Derive from source_file
+        derived = norm_source
+        if derived.startswith("text/"):
+            derived = "audio/" + derived[5:]
+        if derived.endswith(".txt"):
+            derived = derived[:-4] + ".mp3"
+        audio_rel = derived
+
+    full_path = os.path.normpath(os.path.join(out_dir, audio_rel)).replace("\\", "/")
+    return (full_path, os.path.isfile(full_path))
 
 
 def wipe(index_path: str = FAISS_INDEX_PATH, db_path: str = SQLITE_DB_PATH) -> None:
