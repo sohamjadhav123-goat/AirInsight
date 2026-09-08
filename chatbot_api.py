@@ -100,7 +100,7 @@ async def stats():
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "ok"}
+    return {"status": "ok", "generation_mode": rag_engine.get_generation_mode()}
 
 
 @app.get("/", response_class=HTMLResponse)

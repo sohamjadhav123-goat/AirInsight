@@ -184,19 +184,46 @@ def _build_context(sources: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _generate_with_gemini(context: str, user_query: str, history: list[dict] = None) -> str:
-    """Call Gemini API with system prompt, context, and user query."""
+_generation_mode: str = "UNKNOWN"
+
+
+def _probe_gemini() -> str:
+    """Probe the Gemini API to check if it is reachable and operational."""
     try:
         import google.generativeai as genai
     except ImportError:
-        logger.warning("google-generativeai not installed, using extractive fallback")
-        return ""
+        return "FALLBACK (library missing)"
 
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        logger.info("GEMINI_API_KEY not set, using extractive fallback")
+        return "FALLBACK (no API key)"
+
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        model.generate_content("ping")
+        return "LIVE"
+    except Exception as e:
+        return f"FALLBACK (model error: {e})"
+
+
+def get_generation_mode() -> str:
+    """Return the current generation mode ('LIVE' or 'FALLBACK (...)')."""
+    global _generation_mode
+    if _generation_mode == "UNKNOWN":
+        _generation_mode = _probe_gemini()
+        logger.info("Generation mode: %s", _generation_mode)
+    return _generation_mode
+
+
+def _generate_with_gemini(context: str, user_query: str, history: list[dict] = None) -> str:
+    """Call Gemini API with system prompt, context, and user query."""
+    mode = get_generation_mode()
+    if mode != "LIVE":
         return ""
 
+    import google.generativeai as genai
+    api_key = os.environ.get("GEMINI_API_KEY")
     genai.configure(api_key=api_key)
 
     system_prompt = (
