@@ -26,7 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("rag_engine")
 
-# Genre keyword mapping for Phase 1 (simple keyword matching)
+# Genre keyword mapping for Phase 1 (word-boundary matched)
 GENRE_KEYWORD_MAP = {
     "cricket": "Sports", "football": "Sports", "hockey": "Sports",
     "tennis": "Sports", "olympics": "Sports", "sports": "Sports",
@@ -41,10 +41,11 @@ GENRE_KEYWORD_MAP = {
     "fiscal": "Economy", "tax": "Economy", "economic": "Economy",
     "science": "Science & Technology", "technology": "Science & Technology",
     "isro": "Science & Technology", "space": "Science & Technology",
-    "ai": "Science & Technology", "digital": "Science & Technology",
+    "artificial intelligence": "Science & Technology", "digital": "Science & Technology",
     "research": "Science & Technology", "satellite": "Science & Technology",
-    "china": "International", "pakistan": "International", "us": "International",
-    "america": "International", "russia": "International", "un": "International",
+    "china": "International", "pakistan": "International",
+    "america": "International", "russia": "International",
+    "united nations": "International", "united states": "International",
     "international": "International", "global": "International",
     "foreign": "International", "diplomat": "International",
     "army": "Defence & Security", "navy": "Defence & Security",
@@ -53,7 +54,7 @@ GENRE_KEYWORD_MAP = {
     "terror": "Defence & Security", "border": "Defence & Security",
     "health": "Health", "covid": "Health", "hospital": "Health",
     "disease": "Health", "vaccine": "Health", "medical": "Health",
-    "doctor": "Health", "who": "Health", "pandemic": "Health",
+    "doctor": "Health", "pandemic": "Health",
     "environment": "Environment", "climate": "Environment",
     "pollution": "Environment", "forest": "Environment",
     "wildlife": "Environment", "green": "Environment", "flood": "Environment",
@@ -61,7 +62,7 @@ GENRE_KEYWORD_MAP = {
     "culture": "Society & Culture", "festival": "Society & Culture",
     "education": "Society & Culture", "society": "Society & Culture",
     "women": "Society & Culture", "caste": "Society & Culture",
-    "religion": "Society & Culture", "art": "Society & Culture",
+    "religion": "Society & Culture",
 }
 
 
@@ -126,15 +127,26 @@ def _parse_date_range(query: str) -> tuple[Optional[str], Optional[str]]:
 
 
 def _extract_genre(query: str) -> Optional[str]:
-    """Extract genre from query using keyword matching."""
+    """Extract genre from query using word-boundary keyword matching.
+
+    Returns None if no keywords match or if there is a tie between genres.
+    """
     q = query.lower()
     genre_scores: dict[str, int] = {}
     for keyword, genre in GENRE_KEYWORD_MAP.items():
-        if keyword in q:
-            genre_scores[genre] = genre_scores.get(genre, 0) + 1
-    if genre_scores:
-        return max(genre_scores, key=genre_scores.get)
-    return None
+        # Use word boundaries to avoid substring false positives
+        pattern = r'\b' + re.escape(keyword) + r'\b'
+        hits = len(re.findall(pattern, q))
+        if hits > 0:
+            genre_scores[genre] = genre_scores.get(genre, 0) + hits
+    if not genre_scores:
+        return None
+    # Return None on a tie instead of guessing
+    top_score = max(genre_scores.values())
+    top_genres = [g for g, s in genre_scores.items() if s == top_score]
+    if len(top_genres) > 1:
+        return None
+    return top_genres[0]
 
 
 def _build_context(sources: list[dict]) -> str:
