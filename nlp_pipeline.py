@@ -48,6 +48,7 @@ _embedding_model = None
 
 def segment_sentences(text: str) -> list[str]:
     """Split raw transcript text into individual sentences using NLTK."""
+    text = text.lstrip('\ufeff')
     sentences = nltk.sent_tokenize(text)
     return [s.strip() for s in sentences if s.strip()]
 
@@ -99,6 +100,66 @@ def embed_sentences(sentences: list[str]) -> np.ndarray:
     return model.encode(sentences, show_progress_bar=False, convert_to_numpy=True).astype(np.float32)
 
 
+def mmr_novelty_filter_detailed(
+    sentences: list[str],
+    embeddings: np.ndarray,
+    existing_embeddings: Optional[np.ndarray] = None,
+    existing_texts: Optional[list[str]] = None,
+    threshold: float = DEFAULT_MMR_THRESHOLD,
+) -> tuple[list[int], list[dict]]:
+    """MMR novelty gate: streaming cosine-similarity deduplication.
+
+    Returns:
+        (novel_indices, rejections)
+        where rejections is a list of dicts:
+        {"rejected_text": str, "matched_text": str, "cosine_score": float, "matched_source_idx": int}
+    """
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1, norms)
+    normed = embeddings / norms
+
+    if existing_embeddings is not None and len(existing_embeddings) > 0:
+        ex_norms = np.linalg.norm(existing_embeddings, axis=1, keepdims=True)
+        ex_norms = np.where(ex_norms == 0, 1, ex_norms)
+        pool = list(existing_embeddings / ex_norms)
+        if existing_texts and len(existing_texts) == len(existing_embeddings):
+            pool_texts = list(existing_texts)
+        else:
+            pool_texts = [f"Existing segment #{idx+1}" for idx in range(len(existing_embeddings))]
+    else:
+        pool = []
+        pool_texts = []
+
+    novel_indices: list[int] = []
+    rejections: list[dict] = []
+
+    for i in range(len(normed)):
+        if pool:
+            pool_matrix = np.vstack(pool)
+            sims = pool_matrix @ normed[i]
+            best_idx = int(np.argmax(sims))
+            max_sim = float(sims[best_idx])
+        else:
+            max_sim = -1.0
+            best_idx = -1
+
+        if max_sim >= threshold:
+            logger.debug("DUPLICATE (sim=%.3f): %s", max_sim, sentences[i][:80])
+            matched_str = pool_texts[best_idx] if 0 <= best_idx < len(pool_texts) else ""
+            rejections.append({
+                "rejected_text": sentences[i],
+                "matched_text": matched_str,
+                "cosine_score": round(max_sim, 4),
+                "matched_source_idx": best_idx,
+            })
+        else:
+            novel_indices.append(i)
+            pool.append(normed[i])
+            pool_texts.append(sentences[i])
+
+    return novel_indices, rejections
+
+
 def mmr_novelty_filter(
     sentences: list[str],
     embeddings: np.ndarray,
@@ -109,32 +170,9 @@ def mmr_novelty_filter(
 
     Returns indices of novel (non-duplicate) sentences.
     """
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    norms = np.where(norms == 0, 1, norms)
-    normed = embeddings / norms
-
-    if existing_embeddings is not None and len(existing_embeddings) > 0:
-        ex_norms = np.linalg.norm(existing_embeddings, axis=1, keepdims=True)
-        ex_norms = np.where(ex_norms == 0, 1, ex_norms)
-        pool = list(existing_embeddings / ex_norms)
-    else:
-        pool = []
-
-    novel_indices: list[int] = []
-    for i in range(len(normed)):
-        if pool:
-            pool_matrix = np.vstack(pool)
-            sims = pool_matrix @ normed[i]
-            max_sim = float(np.max(sims))
-        else:
-            max_sim = -1.0
-
-        if max_sim >= threshold:
-            logger.debug("DUPLICATE (sim=%.3f): %s", max_sim, sentences[i][:80])
-        else:
-            novel_indices.append(i)
-            pool.append(normed[i])
-
+    novel_indices, _ = mmr_novelty_filter_detailed(
+        sentences, embeddings, existing_embeddings, threshold=threshold
+    )
     return novel_indices
 
 
@@ -143,23 +181,32 @@ def process_transcript(
     existing_embeddings: Optional[np.ndarray] = None,
     fast: bool = False,
     mmr_threshold: float = DEFAULT_MMR_THRESHOLD,
-) -> list[dict]:
+    detailed: bool = False,
+    existing_texts: Optional[list[str]] = None,
+):
     """Run the full NLP pipeline on a transcript string.
 
-    Returns list of dicts with keys: text, genre, genre_confidence, embedding.
+    If detailed=True, returns (segments, rejections).
+    Otherwise returns segments list.
     """
     sentences = segment_sentences(text)
     logger.info("Segmented transcript into %d sentences", len(sentences))
     if not sentences:
-        return []
+        return ([], []) if detailed else []
 
     embeddings = embed_sentences(sentences)
     logger.info("Generated embeddings: shape %s", embeddings.shape)
 
-    novel_indices = mmr_novelty_filter(sentences, embeddings, existing_embeddings, threshold=mmr_threshold)
+    novel_indices, rejections = mmr_novelty_filter_detailed(
+        sentences,
+        embeddings,
+        existing_embeddings=existing_embeddings,
+        existing_texts=existing_texts,
+        threshold=mmr_threshold,
+    )
     logger.info("MMR filter: %d novel / %d total (threshold=%.2f)", len(novel_indices), len(sentences), mmr_threshold)
     if not novel_indices:
-        return []
+        return ([], rejections) if detailed else []
 
     novel_sentences = [sentences[i] for i in novel_indices]
     novel_embeddings = embeddings[novel_indices]
@@ -174,7 +221,7 @@ def process_transcript(
             "genre_confidence": confidence,
             "embedding": novel_embeddings[idx],
         })
-    return segments
+    return (segments, rejections) if detailed else segments
 
 
 def main() -> int:

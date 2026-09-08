@@ -249,6 +249,16 @@ def get_all_embeddings(index_path: str = FAISS_INDEX_PATH) -> Optional[np.ndarra
     return faiss.rev_swig_ptr(index.get_xb(), index.ntotal * EMBEDDING_DIM).reshape(index.ntotal, EMBEDDING_DIM).copy()
 
 
+def get_all_texts(db_path: str = SQLITE_DB_PATH) -> list[str]:
+    """Return all stored segment texts ordered by faiss_id."""
+    if not os.path.isfile(db_path):
+        return []
+    db = _get_db(db_path)
+    rows = db.execute("SELECT text FROM segments ORDER BY faiss_id ASC").fetchall()
+    db.close()
+    return [r["text"] for r in rows]
+
+
 def get_stats(
     index_path: str = FAISS_INDEX_PATH,
     db_path: str = SQLITE_DB_PATH,

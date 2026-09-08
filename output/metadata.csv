@@ -1,0 +1,5 @@
+title,date,language,category,audio_url,audio_file,transcript_file,sha256,downloaded_at
+Hourly English,2024-05-01,english,hourly-news,https://example.com/audio1.mp3,,text/2024-05-01/English-0800-0810-1.txt,mockhash1,2024-05-01T08:00:00Z
+Hourly English,2024-05-01,english,hourly-news,https://example.com/audio2.mp3,,text/2024-05-01/English-0900-0910-1.txt,mockhash2,2024-05-01T09:00:00Z
+Hourly English,2024-05-01,english,hourly-news,https://example.com/audio3.mp3,,text/2024-05-01/English-1000-1010-1.txt,mockhash3,2024-05-01T10:00:00Z
+Hourly English,2024-05-02,english,hourly-news,https://example.com/audio4.mp3,,text/2024-05-02/English-0800-0810-1.txt,mockhash4,2024-05-02T08:00:00Z

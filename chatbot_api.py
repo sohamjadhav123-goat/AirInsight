@@ -11,7 +11,9 @@ Run with:
   uvicorn chatbot_api:app --reload --port 8000
 """
 
+import json
 import logging
+import os
 import uuid
 from typing import Optional
 
@@ -101,6 +103,19 @@ async def stats():
 async def health():
     """Health check endpoint."""
     return {"status": "ok", "generation_mode": rag_engine.get_generation_mode()}
+
+
+@app.get("/dedup")
+async def dedup():
+    """Return deduplication report statistics and top dropped duplicate pairs."""
+    report_path = "dedup_report.json"
+    if not os.path.isfile(report_path):
+        return {"error": "no report"}
+    try:
+        with open(report_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -337,9 +352,16 @@ CHAT_HTML = """<!DOCTYPE html>
 
 <div class="header">
   <div class="header-logo">V</div>
-  <div>
+  <div style="flex: 1;">
     <h1>VaniStream</h1>
     <p>AIR News Intelligence Assistant</p>
+    <div id="dedupBanner" style="display:none; margin-top: 4px; font-size: 11px;">
+      <span id="dedupStatsText" style="color: var(--success); font-weight: 500;"></span>
+      <details id="dedupDetails" style="margin-top: 4px; cursor: pointer;">
+        <summary style="color: var(--accent); font-size: 11px; outline: none; user-select: none;">View deduplication examples</summary>
+        <div id="dedupExamples" style="margin-top: 6px; padding: 8px 12px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 6px; font-size: 11px; line-height: 1.4;"></div>
+      </details>
+    </div>
   </div>
   <div class="status-dot" title="System online"></div>
 </div>
@@ -466,6 +488,37 @@ document.getElementById('chatInput').addEventListener('input', function() {
   this.style.height = 'auto';
   this.style.height = Math.min(this.scrollHeight, 120) + 'px';
 });
+
+async function loadDedupStats() {
+  try {
+    const res = await fetch('/dedup');
+    const data = await res.json();
+    if (data && data.totals && data.totals.total_sentences > 0) {
+      const banner = document.getElementById('dedupBanner');
+      const statsText = document.getElementById('dedupStatsText');
+      const examplesDiv = document.getElementById('dedupExamples');
+      const t = data.totals;
+      statsText.textContent = `Redundancy removed: ${t.total_sentences} → ${t.novel_sentences} sentences, ${t.reduction_pct}%`;
+
+      if (data.top_rejected_pairs && data.top_rejected_pairs.length > 0) {
+        const top3 = data.top_rejected_pairs.slice(0, 3);
+        let html = '';
+        top3.forEach((p, idx) => {
+          html += `<div style="margin-bottom: ${idx < top3.length - 1 ? '8px' : '0'}; border-bottom: ${idx < top3.length - 1 ? '1px solid var(--border)' : 'none'}; padding-bottom: ${idx < top3.length - 1 ? '6px' : '0'};">`
+            + `<div style="color: var(--warning); font-weight: 600;">Dropped duplicate (sim: ${p.cosine_score}):</div>`
+            + `<div style="color: var(--text-primary); margin: 2px 0;">"${escapeHtml(p.rejected_text)}"</div>`
+            + `<div style="color: var(--text-muted); font-size: 10px;">Matched: "${escapeHtml(p.matched_text)}"</div>`
+            + `</div>`;
+        });
+        examplesDiv.innerHTML = html;
+      }
+      banner.style.display = 'block';
+    }
+  } catch (e) {
+    console.error('Failed to load dedup stats', e);
+  }
+}
+loadDedupStats();
 </script>
 </body>
 </html>"""

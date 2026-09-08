@@ -11,6 +11,7 @@ CLI usage:
 
 import argparse
 import csv
+import json
 import logging
 import os
 import re
@@ -91,6 +92,8 @@ def run(
         # Clear processed tracker
         if os.path.isfile(PROCESSED_FILE):
             os.remove(PROCESSED_FILE)
+        if os.path.isfile("dedup_report.json"):
+            os.remove("dedup_report.json")
 
     rows = _read_metadata(metadata_csv)
     if not rows:
@@ -103,6 +106,8 @@ def run(
     total_segments = 0
     total_duplicates = 0
     files_done = 0
+    per_file: list[dict] = []
+    all_rejections: list[dict] = []
 
     for row in rows:
         transcript_rel = row["transcript_file"]
@@ -126,23 +131,34 @@ def run(
             _mark_processed(transcript_rel)
             continue
 
-        # Load current embeddings for dedup
+        # Load current embeddings and texts for dedup
         existing_embeddings = vector_store.get_all_embeddings()
+        existing_texts = vector_store.get_all_texts()
 
-        # Run NLP pipeline
+        # Run NLP pipeline with detailed dedup reporting
         logger.info("Processing: %s (date=%s, hour=%d)", transcript_rel, date, hour)
-        segments = process_transcript(
+        segments, file_rejections = process_transcript(
             text,
             existing_embeddings=existing_embeddings,
+            existing_texts=existing_texts,
             fast=fast,
             mmr_threshold=mmr_threshold,
+            detailed=True,
         )
 
-        # Count duplicates (original sentences minus novel ones)
         from nlp_pipeline import segment_sentences
         original_count = len(segment_sentences(text))
-        dup_count = original_count - len(segments)
-        total_duplicates += max(dup_count, 0)
+        novel_count = len(segments)
+        rejected_count = len(file_rejections)
+        total_duplicates += rejected_count
+
+        per_file.append({
+            "source_file": transcript_rel,
+            "total_sentences": original_count,
+            "novel_sentences": novel_count,
+            "rejected_sentences": rejected_count,
+        })
+        all_rejections.extend(file_rejections)
 
         # Store in vector store
         if segments:
@@ -151,6 +167,29 @@ def run(
 
         _mark_processed(transcript_rel)
         files_done += 1
+
+    if per_file:
+        tot_sentences = sum(f["total_sentences"] for f in per_file)
+        nov_sentences = sum(f["novel_sentences"] for f in per_file)
+        rej_sentences = sum(f["rejected_sentences"] for f in per_file)
+        red_pct = round((rej_sentences / tot_sentences * 100), 1) if tot_sentences > 0 else 0.0
+
+        all_rejections.sort(key=lambda x: x["cosine_score"], reverse=True)
+        top_rejected = all_rejections[:20]
+
+        dedup_report = {
+            "totals": {
+                "total_sentences": tot_sentences,
+                "novel_sentences": nov_sentences,
+                "rejected_sentences": rej_sentences,
+                "reduction_pct": red_pct,
+            },
+            "per_file": per_file,
+            "top_rejected_pairs": top_rejected,
+        }
+        with open("dedup_report.json", "w", encoding="utf-8") as f:
+            json.dump(dedup_report, f, indent=2, ensure_ascii=False)
+        logger.info("Saved dedup report to dedup_report.json (%d rejected pairs)", len(all_rejections))
 
     summary = {
         "files_processed": files_done,
