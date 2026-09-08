@@ -1,0 +1,99 @@
+# VaniStream — Evaluation Demo Guide
+
+This guide contains everything needed to spin up the system from a clean checkout and run an end-to-end evaluation demo.
+
+---
+
+## 1. Clean Checkout Startup
+
+Run these commands in order from the repository root:
+
+```bash
+# 1. Create and activate virtual environment
+python -m venv venv
+.\venv\Scripts\activate
+
+# 2. Install pinned dependencies
+pip install -r requirements.txt
+
+# 3. Ingest transcripts, run MMR deduplication, and build vector store
+python ingest_pipeline.py --reindex --fast
+
+# 4. Start the FastAPI server & Chat Web UI
+uvicorn chatbot_api:app --reload --port 8000
+```
+
+Open your browser at: **[http://localhost:8000](http://localhost:8000)**
+
+---
+
+## 2. Five Verified Demo Queries
+
+These 5 queries are verified against the indexed AIR news corpus:
+
+### Query 1: Relative Date Search
+- **Query:** `What happened yesterday?`
+- **What it demonstrates:** Dynamic date anchoring (`_get_corpus_anchor()`) resolves relative date queries against the newest date in the corpus (`2024-05-02`), extracting `2024-05-01` bulletins instead of failing on the real-world calendar date.
+- **Expected result:** 5 news segments retrieved from `2024-05-01`, including the India-Australia ICC T20 match victory, Gujarat semiconductor plant inauguration, RBI repo rate decision, and ISRO satellite launch.
+
+### Query 2: Science & Technology Search
+- **Query:** `Tell us about the ISRO satellite launch`
+- **What it demonstrates:** Word-boundary keyword matching correctly classifies query genre as `Science & Technology` (without false-positive matching on "us").
+- **Expected result:** Retrieves the ISRO earth observation satellite launch segment.
+
+### Query 3: Defence & Security Search
+- **Query:** `What are the latest defence and military updates?`
+- **What it demonstrates:** Genre pre-filtering restricts the search space to `Defence & Security` in SQLite before FAISS similarity calculation.
+- **Expected result:** Retrieves: *"Defence forces completed joint military exercises demonstrating multi-domain operational readiness."*
+
+### Query 4: Politics Search
+- **Query:** `What happened in politics?`
+- **What it demonstrates:** Two-tier RAG filtering on `Politics`.
+- **Expected result:** Retrieves: *"The Supreme Court reserved its judgment on important constitutional petitions regarding electoral reforms."*
+
+### Query 5: Environmental & Weather Search
+- **Query:** `What is the weather report?`
+- **What it demonstrates:** Genre extraction mapping "weather" to `Environment`.
+- **Expected result:** Retrieves: *"Heavy rainfall lashed coastal regions bringing relief from intense summer heatwaves."*
+
+---
+
+## 3. Demo Safety & Out-of-Range Handling
+
+To demonstrate that the system **never** silently performs global search when a filter finds no results:
+
+- **Query:** `sports news on 2099-01-01`
+- **Expected result:** Explicit message stating:
+  > *"No news segments found for 2099-01-01 to 2099-01-01 in genre 'Sports'. My corpus covers 2024-05-01 to 2024-05-02."*
+
+---
+
+## 4. Key Demo Features
+
+### A. Deduplication Proof
+- **Endpoint:** `GET http://localhost:8000/dedup`
+- **UI Element:** View the green summary badge in the UI header:
+  > *"Redundancy removed: 20 → 12 sentences, 40.0%"*
+- Click **"View deduplication examples"** in the header to expand the top 3 rejected duplicate pairs with their cosine similarity scores.
+
+### B. Story Evolution Timeline
+- **Endpoint:** `GET http://localhost:8000/timeline?q=politics`
+- **UI Element:** Enter any query into the chat input and click the **"Timeline"** button.
+- Displays chronological story evolution grouped by broadcast date and ordered by broadcast hour (`08:00 hrs`, `09:00 hrs`, `10:00 hrs`).
+
+### C. Generation Mode & Health Check
+- **Endpoint:** `GET http://localhost:8000/health`
+- Returns:
+  ```json
+  {"status": "ok", "generation_mode": "FALLBACK (no API key)"}
+  ```
+  *(Or `"LIVE"` if `GEMINI_API_KEY` is exported).*
+
+---
+
+## 5. Architecture Defense Q&A
+
+**Question:** *"Why is the classifier zero-shot instead of fine-tuned?"*
+
+**Answer:**
+> **"No labelled training data exists for AIR news genres; zero-shot NLI models generalise from entailment pretraining without requiring domain-specific labels."**
