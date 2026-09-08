@@ -18,7 +18,7 @@ import uuid
 from typing import Optional
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 import rag_engine
@@ -124,6 +124,42 @@ async def timeline(q: str = "", date_from: Optional[str] = None, date_to: Option
     if not q.strip():
         return {"groups": [], "filters_applied": {}}
     return rag_engine.timeline_query(q, date_from=date_from, date_to=date_to)
+
+
+@app.get("/audio/{faiss_id:int}")
+async def get_audio(faiss_id: int):
+    """Serve the audio bulletin MP3 corresponding to a segment's faiss_id."""
+    db_path = vector_store.SQLITE_DB_PATH
+    if not os.path.isfile(db_path):
+        return JSONResponse(status_code=404, content={"error": "Database not initialized"})
+
+    db = vector_store._get_db(db_path)
+    row = db.execute("SELECT source_file FROM segments WHERE faiss_id = ?", (faiss_id,)).fetchone()
+    db.close()
+
+    if not row:
+        return JSONResponse(status_code=404, content={"error": f"Segment {faiss_id} not found"})
+
+    source_file = row["source_file"]
+    audio_relpath, exists = vector_store.resolve_audio_path(source_file)
+
+    # Security check: ensure path stays strictly inside output/audio
+    audio_dir = os.path.abspath(os.path.join("output", "audio"))
+    target_abs = os.path.abspath(audio_relpath)
+    try:
+        if os.path.commonpath([audio_dir, target_abs]) != audio_dir:
+            return JSONResponse(status_code=403, content={"error": "Access denied: path escapes audio directory"})
+    except ValueError:
+        return JSONResponse(status_code=403, content={"error": "Access denied: path escapes audio directory"})
+
+    if not exists or not os.path.isfile(target_abs):
+        return JSONResponse(status_code=404, content={"error": f"Audio file not found on disk for segment {faiss_id}"})
+
+    return FileResponse(
+        target_abs,
+        media_type="audio/mpeg",
+        filename=os.path.basename(target_abs),
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
