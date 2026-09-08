@@ -28,24 +28,27 @@ def main() -> int:
     assert r_missing.json()["error"] == "Segment 99999 not found"
 
     # 2. Existing faiss_id (0) with audio missing on disk
-    # Ensure audio doesn't exist yet
     test_audio_path = os.path.join("output", "audio", "2024-05-01", "English-0800-0810-1.mp3")
-    if os.path.exists(test_audio_path):
-        os.remove(test_audio_path)
-
-    r_file_missing = client.get("/audio/0")
-    print(f"Existing ID 0 without audio file: status={r_file_missing.status_code}, body={r_file_missing.json()}")
-    assert r_file_missing.status_code == 404
-    assert "error" in r_file_missing.json()
-
-    # 3. Create a temporary MP3 file for segment 0
-    os.makedirs(os.path.dirname(test_audio_path), exist_ok=True)
-    # Write 1000 bytes dummy MP3 content
-    dummy_mp3 = bytes([0xFF, 0xFB, 0x90, 0x64]) + bytes(996)
-    with open(test_audio_path, "wb") as f:
-        f.write(dummy_mp3)
+    backup_path = test_audio_path + ".testbak"
+    had_original = os.path.exists(test_audio_path)
+    if had_original:
+        if os.path.exists(backup_path):
+            os.remove(backup_path)
+        os.rename(test_audio_path, backup_path)
 
     try:
+        r_file_missing = client.get("/audio/0")
+        print(f"Existing ID 0 without audio file: status={r_file_missing.status_code}, body={r_file_missing.json()}")
+        assert r_file_missing.status_code == 404
+        assert "error" in r_file_missing.json()
+
+        # 3. Create a temporary MP3 file for segment 0
+        os.makedirs(os.path.dirname(test_audio_path), exist_ok=True)
+        # Write 1000 bytes dummy MP3 content
+        dummy_mp3 = bytes([0xFF, 0xFB, 0x90, 0x64]) + bytes(996)
+        with open(test_audio_path, "wb") as f:
+            f.write(dummy_mp3)
+
         # 3a. Full file request
         r_ok = client.get("/audio/0")
         print(f"Existing ID 0 with audio: status={r_ok.status_code}, content-type={r_ok.headers.get('content-type')}")
@@ -63,6 +66,8 @@ def main() -> int:
     finally:
         if os.path.exists(test_audio_path):
             os.remove(test_audio_path)
+        if had_original and os.path.exists(backup_path):
+            os.rename(backup_path, test_audio_path)
 
     # 5. Malicious crafted ID / boundary check
     # Try invalid type (e.g. /audio/evil)

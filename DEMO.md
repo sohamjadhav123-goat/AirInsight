@@ -89,6 +89,24 @@ To demonstrate that the system **never** silently performs global search when a 
   ```
   *(Or `"LIVE"` if `GEMINI_API_KEY` is exported).*
 
+### D. Click-to-Play Audio Citations
+- **Audio File on Disk:** `output/audio/2024-05-01/English-0800-0810-1.mp3`
+- **What it demonstrates:** Proves the end-to-end provenance chain from raw radio broadcast to transcript segment and RAG citation.
+- **Testing in Chat UI:**
+  1. Submit query: `Tell me about the semiconductor facility in Gujarat`
+  2. The response renders source chips. Citations backed by an on-disk audio file display a clickable `▶ Audio` button.
+  3. Clicking `▶ Audio` activates the shared bottom audio player bar (`#audioPlayerBar`) and begins playback with track metadata:
+     > *"AIR Bulletin (2024-05-01 800) (plays full bulletin — sentence-level alignment is future work)"*
+  4. The button transitions to `⏸ Stop`. Clicking it or the close button (`✕`) halts playback and hides/resets the player bar.
+- **Testing in Timeline UI:**
+  1. Enter `semiconductor` and click **"Timeline"**.
+  2. The chronological card for 08:00 hrs displays the `▶ Audio` button alongside relevance score and genre badge.
+- **Streaming & HTTP Range Endpoint:**
+  - **Endpoint:** `GET http://localhost:8000/audio/0`
+  - Returns `200 OK` (`Content-Type: audio/mpeg`) or `206 Partial Content` with `Accept-Ranges: bytes` when scrubbing in the browser.
+- **Demo Safety & Graceful Degradation:**
+  - If `output/audio` is deleted or missing, the system does not crash or throw errors: `/chat` and `/timeline` seamlessly return `has_audio: false`, and audio buttons are cleanly hidden in the UI.
+
 ---
 
 ## 5. Architecture Defense Q&A

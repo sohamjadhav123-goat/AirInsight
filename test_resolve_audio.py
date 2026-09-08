@@ -33,7 +33,7 @@ def main() -> int:
         print(f"  Row {i}: '{sf}' -> '{path}' (exists={exists})")
         assert path.startswith(expected_start), f"Expected path to start with '{expected_start}', got '{path}'"
         assert path.endswith(expected_end), f"Expected path to end with '{expected_end}', got '{path}'"
-        assert not exists, f"Audio file should not exist yet before download: {path}"
+        assert exists == os.path.exists(path), f"exists flag ({exists}) did not match os.path.exists({path})"
 
     # Test metadata.csv preference
     with tempfile.NamedTemporaryFile("w", delete=False, suffix=".csv", newline="", encoding="utf-8") as f:
