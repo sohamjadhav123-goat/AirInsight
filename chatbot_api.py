@@ -68,11 +68,11 @@ async def chat(req: ChatRequest):
     if sid not in _sessions:
         _sessions[sid] = []
 
+    # Prior turns for context (exclude current message)
+    history = _sessions[sid][-6:]  # 3 turns = 6 messages (user+model)
+
     # Add user message to history
     _sessions[sid].append({"role": "user", "content": req.message})
-
-    # Get last 3 turns for context
-    history = _sessions[sid][-6:]  # 3 turns = 6 messages (user+model)
 
     result = rag_engine.answer_query(req.message, history=history)
 
