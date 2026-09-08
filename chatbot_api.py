@@ -118,6 +118,14 @@ async def dedup():
         return {"error": str(e)}
 
 
+@app.get("/timeline")
+async def timeline(q: str = "", date_from: Optional[str] = None, date_to: Optional[str] = None):
+    """Retrieve chronologically grouped segments matching a query."""
+    if not q.strip():
+        return {"groups": [], "filters_applied": {}}
+    return rag_engine.timeline_query(q, date_from=date_from, date_to=date_to)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def ui():
     """Serve the chatbot web UI."""
@@ -317,6 +325,24 @@ CHAT_HTML = """<!DOCTYPE html>
   }
   #sendBtn:active { transform: translateY(0); }
   #sendBtn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+  #timelineBtn {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0 16px;
+    color: var(--accent);
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.2s;
+  }
+  #timelineBtn:hover {
+    border-color: var(--accent);
+    background: var(--accent-glow);
+    transform: translateY(-1px);
+  }
+  #timelineBtn:active { transform: translateY(0); }
 
   /* Welcome */
   .welcome {
@@ -384,6 +410,7 @@ CHAT_HTML = """<!DOCTYPE html>
   <div class="input-row">
     <textarea id="chatInput" placeholder="Ask about AIR news broadcasts..."
               rows="1" onkeydown="handleKey(event)"></textarea>
+    <button id="timelineBtn" onclick="showTimeline()" title="View story evolution across dates/hours">Timeline</button>
     <button id="sendBtn" onclick="sendMessage()">Send</button>
   </div>
 </div>
@@ -481,6 +508,67 @@ async function sendMessage() {
   }
   btn.disabled = false;
   input.focus();
+}
+
+function addTimelineMessage(query, data) {
+  const welcome = document.getElementById('welcome');
+  if (welcome) welcome.remove();
+
+  const box = document.getElementById('chatBox');
+  const div = document.createElement('div');
+  div.className = 'message bot';
+
+  let html = '<div class="msg-label">VaniStream &bull; Timeline Analysis</div>';
+  html += '<div class="bubble">';
+  html += '<div style="font-weight: 600; color: var(--accent); margin-bottom: 10px; font-size: 14px;">Chronological Timeline: "' + escapeHtml(query) + '"</div>';
+
+  if (!data.groups || data.groups.length === 0) {
+    html += '<div style="color: var(--text-secondary);">No timeline segments found for this query in the current corpus.</div>';
+  } else {
+    data.groups.forEach(g => {
+      html += '<div style="margin-top: 12px; margin-bottom: 6px; font-weight: 700; color: var(--text-primary); font-size: 13px; display: flex; align-items: center; gap: 8px;">';
+      html += '<span style="background: var(--accent); width: 8px; height: 8px; border-radius: 50%; display: inline-block;"></span>';
+      html += '<span>' + escapeHtml(g.date) + '</span>';
+      html += '</div>';
+
+      g.segments.forEach(seg => {
+        const hourStr = String(seg.hour).padStart(4, '0');
+        const formattedHour = hourStr.slice(0, 2) + ':' + hourStr.slice(2);
+        html += '<div style="margin-left: 12px; margin-bottom: 8px; padding: 10px 14px; background: var(--bg-tertiary); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px;">';
+        html += '<div style="display: flex; gap: 8px; margin-bottom: 4px; align-items: center; font-size: 11px;">';
+        html += '<span style="font-weight: 600; color: var(--text-primary);">' + formattedHour + ' hrs</span>';
+        html += '<span class="source-genre">' + escapeHtml(seg.genre) + '</span>';
+        if (seg.score) html += '<span style="color: var(--text-muted);">relevance: ' + seg.score.toFixed(2) + '</span>';
+        html += '</div>';
+        html += '<div style="color: var(--text-primary); font-size: 13px; line-height: 1.5;">' + escapeHtml(seg.text) + '</div>';
+        html += '</div>';
+      });
+    });
+  }
+
+  html += '</div>';
+  div.innerHTML = html;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+async function showTimeline() {
+  const input = document.getElementById('chatInput');
+  let q = input.value.trim();
+  if (!q) {
+    q = "news";
+  }
+
+  showTyping();
+  try {
+    const res = await fetch('/timeline?q=' + encodeURIComponent(q));
+    const data = await res.json();
+    removeTyping();
+    addTimelineMessage(q, data);
+  } catch (err) {
+    removeTyping();
+    addMessage('bot', 'Failed to fetch timeline. Please try again.');
+  }
 }
 
 // Auto-resize textarea

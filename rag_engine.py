@@ -338,6 +338,66 @@ def answer_query(
     }
 
 
+def timeline_query(
+    user_query: str,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+) -> dict:
+    """Retrieve segments for a query and return them chronologically grouped by date.
+
+    Args:
+        user_query: Query string.
+        date_from: Optional start date override.
+        date_to: Optional end date override.
+
+    Returns:
+        Dict with keys: groups, filters_applied.
+        groups: list of {"date": str, "segments": list of segment dicts}
+    """
+    import vector_store
+    from nlp_pipeline import embed_sentences
+
+    # Step 1: Parse query for date range and genre
+    if date_from is None or date_to is None:
+        parsed_from, parsed_to = _parse_date_range(user_query)
+        date_from = date_from or parsed_from
+        date_to = date_to or parsed_to
+
+    # Fallback: last 30 days if no date range found
+    if not date_from or not date_to:
+        today = _get_corpus_anchor()
+        date_from = (today - datetime.timedelta(days=30)).isoformat()
+        date_to = today.isoformat()
+
+    genre = _extract_genre(user_query)
+    filters_applied = {"date_from": date_from, "date_to": date_to, "genre": genre}
+
+    # Step 2: Metadata prefilter
+    faiss_ids = vector_store.metadata_prefilter(date_from, date_to, genre)
+    if not faiss_ids:
+        return {"groups": [], "filters_applied": filters_applied}
+
+    # Step 3: Semantic search with top_k=20
+    query_embedding = embed_sentences([user_query])[0]
+    sources = vector_store.semantic_search(query_embedding, faiss_ids, top_k=20)
+    if not sources:
+        return {"groups": [], "filters_applied": filters_applied}
+
+    # Sort sources by (date, hour)
+    sources.sort(key=lambda s: (s.get("date", ""), s.get("hour", 0)))
+
+    # Group by date
+    groups_dict: dict[str, list[dict]] = {}
+    for src in sources:
+        d = src.get("date", "unknown")
+        if d not in groups_dict:
+            groups_dict[d] = []
+        groups_dict[d].append(src)
+
+    groups = [{"date": d, "segments": segs} for d, segs in groups_dict.items()]
+    return {"groups": groups, "filters_applied": filters_applied}
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1:
