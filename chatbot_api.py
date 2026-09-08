@@ -17,18 +17,19 @@ import os
 import uuid
 from typing import Optional
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+)
+logging.getLogger("faiss.loader").setLevel(logging.WARNING)
+logger = logging.getLogger("chatbot_api")
+
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 import rag_engine
 import vector_store
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-)
-logger = logging.getLogger("chatbot_api")
 
 app = FastAPI(
     title="VaniStream - AIR News Intelligence",
@@ -155,9 +156,17 @@ async def get_audio(faiss_id: int):
     if not exists or not os.path.isfile(target_abs):
         return JSONResponse(status_code=404, content={"error": f"Audio file not found on disk for segment {faiss_id}"})
 
+    # Detect actual audio format from file header
+    with open(target_abs, "rb") as f:
+        header = f.read(12)
+    if header[:4] == b"RIFF" and header[8:12] == b"WAVE":
+        mime = "audio/wav"
+    else:
+        mime = "audio/mpeg"
+
     return FileResponse(
         target_abs,
-        media_type="audio/mpeg",
+        media_type=mime,
         filename=os.path.basename(target_abs),
     )
 
@@ -533,7 +542,8 @@ function addMessage(role, text, sources) {
     sources.forEach(s => {
       let audioBtn = '';
       if (s.has_audio && s.faiss_id !== undefined) {
-        audioBtn = '<button class="audio-btn" data-faiss-id="' + s.faiss_id + '" onclick="toggleAudio(this, ' + s.faiss_id + ', \'' + escapeHtml(s.date) + ' ' + (s.hour ? s.hour : '') + '\')">▶ Audio</button>';
+        const lbl = escapeHtml(s.date + ' ' + (s.hour ? s.hour : ''));
+        audioBtn = '<button class="audio-btn" data-faiss-id="' + s.faiss_id + '" data-label="' + lbl + '" onclick="playAudioFromBtn(this)">▶ Audio</button>';
       }
       html += '<div class="source-chip">'
         + '<span>' + s.date + '</span>'
@@ -631,7 +641,8 @@ function addTimelineMessage(query, data) {
         const formattedHour = hourStr.slice(0, 2) + ':' + hourStr.slice(2);
         let audioBtn = '';
         if (seg.has_audio && seg.faiss_id !== undefined) {
-          audioBtn = '<button class="audio-btn" data-faiss-id="' + seg.faiss_id + '" onclick="toggleAudio(this, ' + seg.faiss_id + ', \'' + escapeHtml(seg.date) + ' ' + formattedHour + '\')">▶ Audio</button>';
+          const lbl = escapeHtml(seg.date + ' ' + formattedHour);
+          audioBtn = '<button class="audio-btn" data-faiss-id="' + seg.faiss_id + '" data-label="' + lbl + '" onclick="playAudioFromBtn(this)">▶ Audio</button>';
         }
         html += '<div style="margin-left: 12px; margin-bottom: 8px; padding: 10px 14px; background: var(--bg-tertiary); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px;">';
         html += '<div style="display: flex; gap: 8px; margin-bottom: 4px; align-items: center; font-size: 11px;">';
@@ -694,6 +705,12 @@ function stopAudio() {
   }
   currentPlayingFaissId = null;
   if (bar) bar.classList.remove('active');
+}
+
+function playAudioFromBtn(btn) {
+  const faissId = parseInt(btn.getAttribute('data-faiss-id'), 10);
+  const label = btn.getAttribute('data-label') || '';
+  toggleAudio(btn, faissId, label);
 }
 
 function toggleAudio(btn, faissId, label) {

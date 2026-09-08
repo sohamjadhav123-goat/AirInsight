@@ -19,6 +19,7 @@ import os
 import sqlite3
 from typing import Optional
 
+logging.getLogger("faiss.loader").setLevel(logging.WARNING)
 import faiss
 import numpy as np
 
