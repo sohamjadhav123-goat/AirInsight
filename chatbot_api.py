@@ -379,6 +379,48 @@ CHAT_HTML = """<!DOCTYPE html>
     transform: translateY(-1px);
   }
   #timelineBtn:active { transform: translateY(0); }
+  .audio-btn {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 4px;
+  }
+  .audio-btn:hover {
+    border-color: var(--accent);
+    background: var(--accent-glow);
+  }
+  .audio-btn.playing {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+    box-shadow: 0 0 8px var(--accent-glow);
+  }
+  #audioPlayerBar {
+    display: none;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border);
+    padding: 8px 24px;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  #audioPlayerBar.active {
+    display: flex;
+  }
+  #sharedAudioPlayer {
+    height: 32px;
+    outline: none;
+  }
 
   /* Welcome */
   .welcome {
@@ -442,6 +484,18 @@ CHAT_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
+<div id="audioPlayerBar">
+  <div style="display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; margin-right: 16px;">
+    <span id="playerIcon" style="color: var(--accent); font-size: 13px;">▶</span>
+    <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+      <span id="playerTrackInfo" style="font-weight: 600; color: var(--text-primary);">Broadcasting</span>
+      <span style="color: var(--text-muted); font-size: 11px; margin-left: 8px;">(plays full bulletin — sentence-level alignment is future work)</span>
+    </div>
+  </div>
+  <audio id="sharedAudioPlayer" controls></audio>
+  <button id="closePlayerBtn" onclick="stopAudio()" title="Close audio player" style="background: none; border: none; color: var(--text-muted); font-size: 18px; cursor: pointer; padding: 0 8px; margin-left: 8px; line-height: 1;">✕</button>
+</div>
+
 <div class="input-area">
   <div class="input-row">
     <textarea id="chatInput" placeholder="Ask about AIR news broadcasts..."
@@ -477,10 +531,15 @@ function addMessage(role, text, sources) {
   if (sources && sources.length > 0) {
     html += '<div class="sources"><div class="sources-title">Sources</div>';
     sources.forEach(s => {
+      let audioBtn = '';
+      if (s.has_audio && s.faiss_id !== undefined) {
+        audioBtn = '<button class="audio-btn" data-faiss-id="' + s.faiss_id + '" onclick="toggleAudio(this, ' + s.faiss_id + ', \'' + escapeHtml(s.date) + ' ' + (s.hour ? s.hour : '') + '\')">▶ Audio</button>';
+      }
       html += '<div class="source-chip">'
         + '<span>' + s.date + '</span>'
         + '<span class="source-genre">' + s.genre + '</span>'
         + '<span>score: ' + (s.score ? s.score.toFixed(2) : '-') + '</span>'
+        + audioBtn
         + '</div>';
     });
     html += '</div>';
@@ -570,11 +629,16 @@ function addTimelineMessage(query, data) {
       g.segments.forEach(seg => {
         const hourStr = String(seg.hour).padStart(4, '0');
         const formattedHour = hourStr.slice(0, 2) + ':' + hourStr.slice(2);
+        let audioBtn = '';
+        if (seg.has_audio && seg.faiss_id !== undefined) {
+          audioBtn = '<button class="audio-btn" data-faiss-id="' + seg.faiss_id + '" onclick="toggleAudio(this, ' + seg.faiss_id + ', \'' + escapeHtml(seg.date) + ' ' + formattedHour + '\')">▶ Audio</button>';
+        }
         html += '<div style="margin-left: 12px; margin-bottom: 8px; padding: 10px 14px; background: var(--bg-tertiary); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px;">';
         html += '<div style="display: flex; gap: 8px; margin-bottom: 4px; align-items: center; font-size: 11px;">';
         html += '<span style="font-weight: 600; color: var(--text-primary);">' + formattedHour + ' hrs</span>';
         html += '<span class="source-genre">' + escapeHtml(seg.genre) + '</span>';
         if (seg.score) html += '<span style="color: var(--text-muted);">relevance: ' + seg.score.toFixed(2) + '</span>';
+        html += audioBtn;
         html += '</div>';
         html += '<div style="color: var(--text-primary); font-size: 13px; line-height: 1.5;">' + escapeHtml(seg.text) + '</div>';
         html += '</div>';
@@ -611,6 +675,85 @@ async function showTimeline() {
 document.getElementById('chatInput').addEventListener('input', function() {
   this.style.height = 'auto';
   this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+});
+
+let currentPlayingFaissId = null;
+let currentPlayingBtn = null;
+
+function stopAudio() {
+  const player = document.getElementById('sharedAudioPlayer');
+  const bar = document.getElementById('audioPlayerBar');
+  if (player) {
+    player.pause();
+    player.currentTime = 0;
+  }
+  if (currentPlayingBtn) {
+    currentPlayingBtn.classList.remove('playing');
+    currentPlayingBtn.innerHTML = '▶ Audio';
+    currentPlayingBtn = null;
+  }
+  currentPlayingFaissId = null;
+  if (bar) bar.classList.remove('active');
+}
+
+function toggleAudio(btn, faissId, label) {
+  const player = document.getElementById('sharedAudioPlayer');
+  const bar = document.getElementById('audioPlayerBar');
+  const trackInfo = document.getElementById('playerTrackInfo');
+
+  if (currentPlayingFaissId === faissId && !player.paused) {
+    // Pause current
+    player.pause();
+    btn.classList.remove('playing');
+    btn.innerHTML = '▶ Audio';
+    currentPlayingFaissId = null;
+    currentPlayingBtn = null;
+    return;
+  }
+
+  // If another track was playing, reset its button
+  if (currentPlayingBtn && currentPlayingBtn !== btn) {
+    currentPlayingBtn.classList.remove('playing');
+    currentPlayingBtn.innerHTML = '▶ Audio';
+  }
+
+  currentPlayingFaissId = faissId;
+  currentPlayingBtn = btn;
+  btn.classList.add('playing');
+  btn.innerHTML = '⏸ Stop';
+
+  if (trackInfo) {
+    trackInfo.textContent = 'AIR Bulletin (' + label + ')';
+  }
+  if (bar) bar.classList.add('active');
+
+  player.src = '/audio/' + faissId;
+  player.play().catch(e => {
+    console.error('Audio playback failed', e);
+    stopAudio();
+  });
+}
+
+// Attach player event listeners
+window.addEventListener('DOMContentLoaded', () => {
+  const player = document.getElementById('sharedAudioPlayer');
+  if (player) {
+    player.addEventListener('ended', stopAudio);
+    player.addEventListener('pause', () => {
+      if (player.currentTime === 0 || player.ended) {
+        stopAudio();
+      } else if (currentPlayingBtn) {
+        currentPlayingBtn.classList.remove('playing');
+        currentPlayingBtn.innerHTML = '▶ Audio';
+      }
+    });
+    player.addEventListener('play', () => {
+      if (currentPlayingBtn) {
+        currentPlayingBtn.classList.add('playing');
+        currentPlayingBtn.innerHTML = '⏸ Stop';
+      }
+    });
+  }
 });
 
 async function loadDedupStats() {
