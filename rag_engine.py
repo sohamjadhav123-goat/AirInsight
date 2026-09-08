@@ -65,6 +65,33 @@ GENRE_KEYWORD_MAP = {
     "religion": "Society & Culture",
 }
 
+_cached_anchor: Optional[datetime.date] = None
+
+
+def _get_corpus_anchor() -> datetime.date:
+    """Return the date anchor for relative query parsing.
+
+    Uses MAX(date) from the vector store if available, falling back to
+    datetime.date.today() if the database is empty.
+    """
+    global _cached_anchor
+    if _cached_anchor is not None:
+        return _cached_anchor
+
+    import vector_store
+    _, max_d = vector_store.get_date_range()
+    if max_d:
+        try:
+            _cached_anchor = datetime.date.fromisoformat(max_d)
+            logger.info("Date anchor: %s (corpus max)", _cached_anchor)
+            return _cached_anchor
+        except ValueError:
+            pass
+
+    _cached_anchor = datetime.date.today()
+    logger.info("Date anchor: %s (real today, empty DB)", _cached_anchor)
+    return _cached_anchor
+
 
 def _parse_date_range(query: str) -> tuple[Optional[str], Optional[str]]:
     """Extract date range from natural language query.
@@ -72,7 +99,7 @@ def _parse_date_range(query: str) -> tuple[Optional[str], Optional[str]]:
     Handles: 'last N days', 'last week', 'yesterday', 'today',
     'on DD Month YYYY', 'between X and Y'.
     """
-    today = datetime.date.today()
+    today = _get_corpus_anchor()
     q = query.lower()
 
     # "last N days"
@@ -226,7 +253,7 @@ def answer_query(
 
     # Fallback: last 30 days if no date range found
     if not date_from or not date_to:
-        today = datetime.date.today()
+        today = _get_corpus_anchor()
         date_from = (today - datetime.timedelta(days=30)).isoformat()
         date_to = today.isoformat()
 
