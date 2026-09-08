@@ -188,7 +188,9 @@ def semantic_search(
     qvec = query_embedding.reshape(1, -1).astype(np.float32)
     faiss.normalize_L2(qvec)
 
-    if faiss_ids is not None and len(faiss_ids) > 0:
+    if faiss_ids is not None:
+        if len(faiss_ids) == 0:
+            return []
         # Filtered search: create an IDSelector
         id_array = np.array(faiss_ids, dtype=np.int64)
         sel = faiss.IDSelectorArray(id_array)
@@ -268,6 +270,18 @@ def get_stats(
 
     db.close()
     return {"total_segments": total, "genres": genres, "date_range": date_range}
+
+
+def get_date_range(db_path: str = SQLITE_DB_PATH) -> tuple[Optional[str], Optional[str]]:
+    """Return (MIN(date), MAX(date)) from the segments table. Returns (None, None) on empty DB."""
+    if not os.path.isfile(db_path):
+        return (None, None)
+    db = _get_db(db_path)
+    row = db.execute("SELECT MIN(date) as min_d, MAX(date) as max_d FROM segments").fetchone()
+    db.close()
+    if row and row["min_d"] is not None and row["max_d"] is not None:
+        return (row["min_d"], row["max_d"])
+    return (None, None)
 
 
 def wipe(index_path: str = FAISS_INDEX_PATH, db_path: str = SQLITE_DB_PATH) -> None:

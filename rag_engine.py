@@ -238,14 +238,27 @@ def answer_query(
     faiss_ids = vector_store.metadata_prefilter(date_from, date_to, genre)
     logger.info("Metadata prefilter returned %d candidate IDs", len(faiss_ids))
 
+    filters_applied = {"date_from": date_from, "date_to": date_to, "genre": genre}
+
+    if not faiss_ids:
+        corpus_min, corpus_max = vector_store.get_date_range()
+        genre_clause = f" in genre '{genre}'" if genre else ""
+        if corpus_min and corpus_max:
+            corpus_msg = f" My corpus covers {corpus_min} to {corpus_max}."
+        else:
+            corpus_msg = " My corpus is currently empty."
+        return {
+            "answer": f"No news segments found for {date_from} to {date_to}{genre_clause}.{corpus_msg}",
+            "sources": [],
+            "filters_applied": filters_applied,
+        }
+
     # Step 3: Semantic search
     query_embedding = embed_sentences([user_query])[0]
-    sources = vector_store.semantic_search(query_embedding, faiss_ids if faiss_ids else None, top_k=5)
+    sources = vector_store.semantic_search(query_embedding, faiss_ids, top_k=5)
     logger.info("Semantic search returned %d results", len(sources))
 
     # Step 4: Generate answer
-    filters_applied = {"date_from": date_from, "date_to": date_to, "genre": genre}
-
     if not sources:
         return {
             "answer": "I don't have any relevant news segments in my database for that query.",
