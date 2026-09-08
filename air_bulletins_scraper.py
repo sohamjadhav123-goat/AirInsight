@@ -7,6 +7,7 @@ import os
 import random
 import re
 import time
+import urllib.robotparser
 from dataclasses import dataclass
 from typing import Iterable, Optional, Tuple
 
@@ -14,11 +15,36 @@ import requests
 from bs4 import BeautifulSoup
 
 AJAX_URL = "https://www.newsonair.gov.in/wp-admin/admin-ajax.php"
-DEFAULT_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/126.0.0.0 Safari/537.36"
-)
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.5; rv:127.0) Gecko/20100101 Firefox/127.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+]
+DEFAULT_UA = USER_AGENTS[0]
+
+
+def rotate_user_agent(session: requests.Session) -> None:
+    """Randomly rotate user agent on session."""
+    session.headers["User-Agent"] = random.choice(USER_AGENTS)
+
+
+def check_robots_txt(session: requests.Session, target_url: str = AJAX_URL) -> None:
+    """Check robots.txt and warn if target URL is disallowed."""
+    try:
+        rp = urllib.robotparser.RobotFileParser()
+        rp.set_url("https://www.newsonair.gov.in/robots.txt")
+        resp = session.get("https://www.newsonair.gov.in/robots.txt", timeout=10)
+        if resp.status_code == 200:
+            rp.parse(resp.text.splitlines())
+            ua = session.headers.get("User-Agent", "*")
+            if not rp.can_fetch(ua, target_url):
+                print(f"WARNING: robots.txt disallows fetching {target_url} for user agent.")
+            else:
+                print("robots.txt check passed: scraping allowed.")
+    except Exception as e:
+        print(f"Note: Could not verify robots.txt: {e}")
 
 
 @dataclass(frozen=True)
@@ -77,6 +103,7 @@ def post_ajax(
     min_delay: float,
     max_delay: float,
 ) -> str:
+    rotate_user_agent(session)
     for attempt in range(1, max_retries + 1):
         try:
             resp = session.post(AJAX_URL, data=payload, timeout=timeout)
@@ -202,6 +229,7 @@ def download_audio(
     if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
         return
 
+    rotate_user_agent(session)
     for attempt in range(1, max_retries + 1):
         try:
             with session.get(url, stream=True, timeout=timeout) as resp:
@@ -354,6 +382,7 @@ def main() -> int:
         date_to = args.date_to
 
     session = make_session(args.user_agent)
+    check_robots_txt(session)
 
     categories = fetch_categories(
         session,
@@ -395,7 +424,7 @@ def main() -> int:
         time_key = item.time_hint if item.time_hint is not None else 9999
         return (date_key, time_key, item.audio_url)
 
-    rows = []
+    saved_count = 0
     prev_text = ""
     for item in sorted(bulletins, key=sort_key):
         if item.audio_url in existing_urls:
@@ -436,27 +465,28 @@ def main() -> int:
                     handle.write(transcript_text)
 
         file_hash = sha256_file(audio_path)
-        rows.append(
-            {
-                "title": item.title,
-                "date": item.date_iso or item.date_text,
-                "language": args.language,
-                "category": category,
-                "audio_url": item.audio_url,
-                "audio_file": os.path.relpath(audio_path, args.out_dir),
-                "transcript_file": os.path.relpath(transcript_path, args.out_dir)
-                if transcript_path
-                else "",
-                "sha256": file_hash,
-                "downloaded_at": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            }
-        )
+        row = {
+            "title": item.title,
+            "date": item.date_iso or item.date_text,
+            "language": args.language,
+            "category": category,
+            "audio_url": item.audio_url,
+            "audio_file": os.path.relpath(audio_path, args.out_dir),
+            "transcript_file": os.path.relpath(transcript_path, args.out_dir)
+            if transcript_path
+            else "",
+            "sha256": file_hash,
+            "downloaded_at": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        # Write immediately to CSV after each item is processed
+        write_csv_rows(args.csv, [row])
+        existing_urls.add(item.audio_url)
+        saved_count += 1
 
         sleep_jitter(args.min_delay, args.max_delay)
 
-    if rows:
-        write_csv_rows(args.csv, rows)
-        print(f"Saved {len(rows)} items to {args.csv}")
+    if saved_count > 0:
+        print(f"Saved {saved_count} items to {args.csv}")
     else:
         print("No new items to save.")
 

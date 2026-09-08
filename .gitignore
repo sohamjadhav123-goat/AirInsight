@@ -1,0 +1,10 @@
+faiss_index.bin
+news_store.db
+processed_files.txt
+output/audio/
+dedup_report.json
+__pycache__/
+.venv/
+venv/
+eval_labels.csv
+*.pyc
