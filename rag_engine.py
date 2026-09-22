@@ -30,6 +30,7 @@ logger = logging.getLogger("rag_engine")
 GENRE_KEYWORD_MAP = {
     "cricket": "Sports", "football": "Sports", "hockey": "Sports",
     "tennis": "Sports", "olympics": "Sports", "sports": "Sports",
+    "sport": "Sports",
     "match": "Sports", "tournament": "Sports", "athlete": "Sports",
     "parliament": "Politics", "election": "Politics", "minister": "Politics",
     "modi": "Politics", "bjp": "Politics", "congress": "Politics",
@@ -158,7 +159,18 @@ def _extract_genre(query: str) -> Optional[str]:
 
     Returns None if no keywords match or if there is a tie between genres.
     """
-    q = query.lower()
+    q = query.lower().strip()
+
+    # Direct match for canonical genre names
+    from nlp_pipeline import GENRE_LABELS
+    for g in GENRE_LABELS:
+        # Check exact string or word boundary match for genre name
+        if q == g.lower():
+            return g
+        pattern = r'\b' + re.escape(g.lower()) + r'\b'
+        if re.search(pattern, q):
+            return g
+
     genre_scores: dict[str, int] = {}
     for keyword, genre in GENRE_KEYWORD_MAP.items():
         # Use word boundaries to avoid substring false positives
@@ -252,6 +264,50 @@ def _generate_with_gemini(context: str, user_query: str, history: list[dict] = N
         return ""
 
 
+GENERIC_NEWS_PATTERNS = [
+    r"^(latest|recent|today|general|all)?\s*(news|headlines|updates|bulletin|broadcasts?)\s*(today|latest|recent)?$",
+    r"^what('s| is) (the )?news\??$",
+    r"^what('s| is) happening\??$",
+    r"^tell me (the )?(latest )?news\??$",
+]
+
+
+def _is_generic_query(query: str) -> bool:
+    clean = query.lower().strip().rstrip("?.!")
+    for pat in GENERIC_NEWS_PATTERNS:
+        if re.match(pat, clean):
+            return True
+    return False
+
+
+def _filter_by_relevance(sources: list[dict], query: str, genre: Optional[str] = None) -> list[dict]:
+    """Filter retrieved FAISS candidate segments by semantic relevance.
+
+    For cosine similarity (FAISS IndexFlatIP on unit vectors):
+    1. If genre was prefiltered via SQLite, candidates already belong to that genre.
+    2. If query is a generic news question, retain candidates above background noise floor (>= 0.05).
+    3. For topical/semantic queries:
+       - If top candidate score < 0.20, return [] (no semantic match in corpus).
+       - Exclude distant tail candidates using adaptive threshold:
+         score >= max(0.20, top_score * 0.65).
+    """
+    if not sources:
+        return []
+
+    if genre:
+        return sources
+
+    if _is_generic_query(query):
+        return [s for s in sources if s.get("score", 0) >= 0.05]
+
+    top_score = max(s.get("score", 0) for s in sources)
+    if top_score < 0.20:
+        return []
+
+    threshold = max(0.20, top_score * 0.65)
+    return [s for s in sources if s.get("score", 0) >= threshold]
+
+
 def answer_query(
     user_query: str,
     date_from: str = None,
@@ -278,17 +334,11 @@ def answer_query(
         date_from = date_from or parsed_from
         date_to = date_to or parsed_to
 
-    # Fallback: last 30 days if no date range found
-    if not date_from or not date_to:
-        today = _get_corpus_anchor()
-        date_from = (today - datetime.timedelta(days=30)).isoformat()
-        date_to = today.isoformat()
-
     genre = _extract_genre(user_query)
 
     logger.info("Query filters: date_from=%s, date_to=%s, genre=%s", date_from, date_to, genre)
 
-    # Step 2: Metadata prefilter
+    # Step 2: Metadata prefilter (date_from and date_to can be None if not specified)
     faiss_ids = vector_store.metadata_prefilter(date_from, date_to, genre)
     logger.info("Metadata prefilter returned %d candidate IDs", len(faiss_ids))
 
@@ -297,20 +347,22 @@ def answer_query(
     if not faiss_ids:
         corpus_min, corpus_max = vector_store.get_date_range()
         genre_clause = f" in genre '{genre}'" if genre else ""
+        date_clause = f" for {date_from} to {date_to}" if (date_from and date_to) else ""
         if corpus_min and corpus_max:
             corpus_msg = f" My corpus covers {corpus_min} to {corpus_max}."
         else:
             corpus_msg = " My corpus is currently empty."
         return {
-            "answer": f"No news segments found for {date_from} to {date_to}{genre_clause}.{corpus_msg}",
+            "answer": f"No news segments found{date_clause}{genre_clause}.{corpus_msg}",
             "sources": [],
             "filters_applied": filters_applied,
         }
 
     # Step 3: Semantic search
     query_embedding = embed_sentences([user_query])[0]
-    sources = vector_store.semantic_search(query_embedding, faiss_ids, top_k=5)
-    logger.info("Semantic search returned %d results", len(sources))
+    raw_sources = vector_store.semantic_search(query_embedding, faiss_ids, top_k=5)
+    sources = _filter_by_relevance(raw_sources, user_query, genre)
+    logger.info("Semantic search returned %d raw results, %d after relevance filtering", len(raw_sources), len(sources))
 
     # Step 4: Generate answer
     if not sources:
@@ -342,6 +394,7 @@ def timeline_query(
     user_query: str,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    genre: Optional[str] = None,
 ) -> dict:
     """Retrieve segments for a query and return them chronologically grouped by date.
 
@@ -349,6 +402,7 @@ def timeline_query(
         user_query: Query string.
         date_from: Optional start date override.
         date_to: Optional end date override.
+        genre: Optional genre override.
 
     Returns:
         Dict with keys: groups, filters_applied.
@@ -363,23 +417,18 @@ def timeline_query(
         date_from = date_from or parsed_from
         date_to = date_to or parsed_to
 
-    # Fallback: last 30 days if no date range found
-    if not date_from or not date_to:
-        today = _get_corpus_anchor()
-        date_from = (today - datetime.timedelta(days=30)).isoformat()
-        date_to = today.isoformat()
-
-    genre = _extract_genre(user_query)
+    genre = genre or _extract_genre(user_query)
     filters_applied = {"date_from": date_from, "date_to": date_to, "genre": genre}
 
-    # Step 2: Metadata prefilter
+    # Step 2: Metadata prefilter (without forcing artificial 30-day cutoff)
     faiss_ids = vector_store.metadata_prefilter(date_from, date_to, genre)
     if not faiss_ids:
         return {"groups": [], "filters_applied": filters_applied}
 
-    # Step 3: Semantic search with top_k=20
+    # Step 3: Semantic search with top_k=20 and relevance filtering
     query_embedding = embed_sentences([user_query])[0]
-    sources = vector_store.semantic_search(query_embedding, faiss_ids, top_k=20)
+    raw_sources = vector_store.semantic_search(query_embedding, faiss_ids, top_k=20)
+    sources = _filter_by_relevance(raw_sources, user_query, genre)
     if not sources:
         return {"groups": [], "filters_applied": filters_applied}
 

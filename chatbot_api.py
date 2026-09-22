@@ -137,14 +137,19 @@ async def dedup():
 
 
 @app.get("/timeline")
-async def timeline(q: str = "", date_from: Optional[str] = None, date_to: Optional[str] = None):
+async def timeline(
+    q: str = "",
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    genre: Optional[str] = None,
+):
     """Retrieve chronologically grouped segments matching a query."""
-    if not q.strip():
+    if not q.strip() and not genre:
         return {"groups": [], "filters_applied": {}}
-    return rag_engine.timeline_query(q, date_from=date_from, date_to=date_to)
+    return rag_engine.timeline_query(q, date_from=date_from, date_to=date_to, genre=genre)
 
 
-@app.get("/audio/{faiss_id:int}")
+@app.api_route("/audio/{faiss_id:int}", methods=["GET", "HEAD"])
 async def get_audio(faiss_id: int):
     """Serve the audio bulletin MP3 corresponding to a segment's faiss_id."""
     db_path = vector_store.SQLITE_DB_PATH
@@ -601,7 +606,7 @@ CHAT_HTML = """<!DOCTYPE html>
     <span id="playerIcon" style="color: var(--accent); font-size: 13px;">▶</span>
     <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
       <span id="playerTrackInfo" style="font-weight: 600; color: var(--text-primary);">Broadcasting</span>
-      <span style="color: var(--text-muted); font-size: 11px; margin-left: 8px;">(plays full bulletin — sentence-level alignment is future work)</span>
+      <span id="playerSubInfo" style="color: var(--text-muted); font-size: 11px; margin-left: 8px;"></span>
     </div>
   </div>
   <audio id="sharedAudioPlayer" controls></audio>
@@ -646,7 +651,9 @@ function addMessage(role, text, sources) {
       let audioBtn = '';
       if (s.has_audio && s.faiss_id !== undefined) {
         const lbl = escapeHtml(s.date + ' ' + (s.hour ? s.hour : ''));
-        audioBtn = '<button class="audio-btn" data-faiss-id="' + s.faiss_id + '" data-label="' + lbl + '" onclick="playAudioFromBtn(this)">▶ Audio</button>';
+        const aStart = (s.audio_start !== undefined && s.audio_start !== null) ? s.audio_start : '';
+        const aEnd = (s.audio_end !== undefined && s.audio_end !== null) ? s.audio_end : '';
+        audioBtn = '<button class="audio-btn" data-faiss-id="' + s.faiss_id + '" data-label="' + lbl + '" data-start="' + aStart + '" data-end="' + aEnd + '" onclick="playAudioFromBtn(this)">▶ Audio</button>';
       }
       html += '<div class="source-chip">'
         + '<span>' + s.date + '</span>'
@@ -690,6 +697,7 @@ async function sendMessage() {
   const msg = input.value.trim();
   if (!msg) return;
 
+  window.lastUserQuery = msg;
   input.value = '';
   input.style.height = 'auto';
   btn.disabled = true;
@@ -728,7 +736,11 @@ function addTimelineMessage(query, data) {
 
   let html = '<div class="msg-label">VaniStream &bull; Timeline Analysis</div>';
   html += '<div class="bubble">';
-  html += '<div style="font-weight: 600; color: var(--accent); margin-bottom: 10px; font-size: 14px;">Chronological Timeline: "' + escapeHtml(query) + '"</div>';
+  let filterBadge = '';
+  if (data.filters_applied && data.filters_applied.genre) {
+    filterBadge = ' <span class="source-genre">' + escapeHtml(data.filters_applied.genre) + '</span>';
+  }
+  html += '<div style="font-weight: 600; color: var(--accent); margin-bottom: 10px; font-size: 14px;">Chronological Timeline: "' + escapeHtml(query) + '"' + filterBadge + '</div>';
 
   if (!data.groups || data.groups.length === 0) {
     html += '<div style="color: var(--text-secondary);">No timeline segments found for this query in the current corpus.</div>';
@@ -745,7 +757,9 @@ function addTimelineMessage(query, data) {
         let audioBtn = '';
         if (seg.has_audio && seg.faiss_id !== undefined) {
           const lbl = escapeHtml(seg.date + ' ' + formattedHour);
-          audioBtn = '<button class="audio-btn" data-faiss-id="' + seg.faiss_id + '" data-label="' + lbl + '" onclick="playAudioFromBtn(this)">▶ Audio</button>';
+          const aStart = (seg.audio_start !== undefined && seg.audio_start !== null) ? seg.audio_start : '';
+          const aEnd = (seg.audio_end !== undefined && seg.audio_end !== null) ? seg.audio_end : '';
+          audioBtn = '<button class="audio-btn" data-faiss-id="' + seg.faiss_id + '" data-label="' + lbl + '" data-start="' + aStart + '" data-end="' + aEnd + '" onclick="playAudioFromBtn(this)">▶ Audio</button>';
         }
         html += '<div style="margin-left: 12px; margin-bottom: 8px; padding: 10px 14px; background: var(--bg-tertiary); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px;">';
         html += '<div style="display: flex; gap: 8px; margin-bottom: 4px; align-items: center; font-size: 11px;">';
@@ -769,7 +783,11 @@ function addTimelineMessage(query, data) {
 async function showTimeline() {
   const input = document.getElementById('chatInput');
   let q = input.value.trim();
-  if (!q) {
+  if (q) {
+    window.lastUserQuery = q;
+  } else if (window.lastUserQuery) {
+    q = window.lastUserQuery;
+  } else {
     q = "news";
   }
 
@@ -793,41 +811,46 @@ document.getElementById('chatInput').addEventListener('input', function() {
 
 let currentPlayingFaissId = null;
 let currentPlayingBtn = null;
+let currentAudioStart = null;
+let currentAudioEnd = null;
 
 function stopAudio() {
   const player = document.getElementById('sharedAudioPlayer');
   const bar = document.getElementById('audioPlayerBar');
+  currentAudioEnd = null;
+  currentAudioStart = null;
+  currentPlayingFaissId = null;
   if (player) {
     player.pause();
-    player.currentTime = 0;
+    player.removeAttribute('src');
+    player.load();
   }
   if (currentPlayingBtn) {
     currentPlayingBtn.classList.remove('playing');
     currentPlayingBtn.innerHTML = '▶ Audio';
     currentPlayingBtn = null;
   }
-  currentPlayingFaissId = null;
   if (bar) bar.classList.remove('active');
 }
 
 function playAudioFromBtn(btn) {
   const faissId = parseInt(btn.getAttribute('data-faiss-id'), 10);
   const label = btn.getAttribute('data-label') || '';
-  toggleAudio(btn, faissId, label);
+  const rawStart = btn.getAttribute('data-start');
+  const rawEnd = btn.getAttribute('data-end');
+  const start = (rawStart !== null && rawStart !== '') ? parseFloat(rawStart) : null;
+  const end = (rawEnd !== null && rawEnd !== '') ? parseFloat(rawEnd) : null;
+  toggleAudio(btn, faissId, label, start, end);
 }
 
-function toggleAudio(btn, faissId, label) {
+function toggleAudio(btn, faissId, label, start, end) {
   const player = document.getElementById('sharedAudioPlayer');
   const bar = document.getElementById('audioPlayerBar');
   const trackInfo = document.getElementById('playerTrackInfo');
+  const subInfo = document.getElementById('playerSubInfo');
 
   if (currentPlayingFaissId === faissId && !player.paused) {
-    // Pause current
-    player.pause();
-    btn.classList.remove('playing');
-    btn.innerHTML = '▶ Audio';
-    currentPlayingFaissId = null;
-    currentPlayingBtn = null;
+    stopAudio();
     return;
   }
 
@@ -837,27 +860,64 @@ function toggleAudio(btn, faissId, label) {
     currentPlayingBtn.innerHTML = '▶ Audio';
   }
 
+  // Clear boundary to avoid race conditions with timeupdate on existing stream
+  currentAudioEnd = null;
+  currentAudioStart = (start !== null && !isNaN(start)) ? start : null;
+  const targetEnd = (end !== null && !isNaN(end)) ? end : null;
+
   currentPlayingFaissId = faissId;
   currentPlayingBtn = btn;
+
   btn.classList.add('playing');
   btn.innerHTML = '⏸ Stop';
 
+  let timeNotice = '(plays full bulletin — sentence timestamps unavailable)';
+  if (currentAudioStart !== null && targetEnd !== null) {
+    timeNotice = `(sentence audio: ${currentAudioStart.toFixed(1)}s – ${targetEnd.toFixed(1)}s)`;
+  }
   if (trackInfo) {
     trackInfo.textContent = 'AIR Bulletin (' + label + ')';
   }
+  if (subInfo) {
+    subInfo.textContent = timeNotice;
+  }
   if (bar) bar.classList.add('active');
 
-  player.src = '/audio/' + faissId;
-  player.play().catch(e => {
-    console.error('Audio playback failed', e);
-    stopAudio();
-  });
+  let mediaSrc = '/audio/' + faissId;
+  if (currentAudioStart !== null) {
+    mediaSrc += '#t=' + currentAudioStart + (targetEnd !== null ? (',' + targetEnd) : '');
+  }
+
+  player.pause();
+  player.src = mediaSrc;
+
+  const startPlayback = () => {
+    if (currentAudioStart !== null) {
+      player.currentTime = currentAudioStart;
+    }
+    currentAudioEnd = targetEnd;
+    player.play().catch(e => {
+      console.error('Audio playback failed', e);
+      stopAudio();
+    });
+  };
+
+  if (player.readyState >= 1) {
+    startPlayback();
+  } else {
+    player.addEventListener('loadedmetadata', startPlayback, { once: true });
+  }
 }
 
 // Attach player event listeners
 window.addEventListener('DOMContentLoaded', () => {
   const player = document.getElementById('sharedAudioPlayer');
   if (player) {
+    player.addEventListener('timeupdate', () => {
+      if (!player.seeking && currentAudioEnd !== null && player.currentTime >= currentAudioEnd) {
+        stopAudio();
+      }
+    });
     player.addEventListener('ended', stopAudio);
     player.addEventListener('pause', () => {
       if (player.currentTime === 0 || player.ended) {
