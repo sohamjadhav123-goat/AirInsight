@@ -341,20 +341,27 @@ class LiveStreamManager:
 
                     # 2. Transcribe
                     transcript_raw = ""
+                    whisper_segs = []
                     try:
                         if transcriber == "faster-whisper":
-                            segments, _info = model.transcribe(
+                            segments_iter, _info = model.transcribe(
                                 audio_path,
                                 vad_filter=True,
                                 language=language if language != "auto" else None,
                             )
-                            transcript_raw = " ".join(seg.text.strip() for seg in segments).strip()
+                            whisper_segs = list(segments_iter)
+                            transcript_raw = " ".join(seg.text.strip() for seg in whisper_segs).strip()
                         elif transcriber == "whisper":
                             result = model.transcribe(
                                 audio_path,
                                 language=language if language != "auto" else None,
                             )
                             transcript_raw = (result.get("text") or "").strip()
+                            if "segments" in result:
+                                class _MockSeg:
+                                    def __init__(self, s, e, t):
+                                        self.start, self.end, self.text = s, e, t
+                                whisper_segs = [_MockSeg(s["start"], s["end"], s.get("text", "")) for s in result["segments"]]
                     except Exception as e:
                         logger.warning("Transcription failed for chunk %d: %s", chunk_idx, e)
 
@@ -395,6 +402,29 @@ class LiveStreamManager:
                         try:
                             import nlp_pipeline
                             import vector_store
+
+                            # Compute sentence timestamps from Whisper segments
+                            sent_list = nlp_pipeline.segment_sentences(transcript_text)
+                            sentence_timestamps = []
+                            if whisper_segs:
+                                w_idx = 0
+                                for s in sent_list:
+                                    s_clean = re.sub(r'\s+', '', s.lower())
+                                    starts, ends = [], []
+                                    accum = ""
+                                    while w_idx < len(whisper_segs):
+                                        w = whisper_segs[w_idx]
+                                        accum += re.sub(r'\s+', '', w.text.lower())
+                                        starts.append(w.start)
+                                        ends.append(w.end)
+                                        w_idx += 1
+                                        if len(accum) >= len(s_clean) or s_clean in accum:
+                                            break
+                                    if starts and ends:
+                                        sentence_timestamps.append((round(min(starts), 2), round(max(ends), 2)))
+                                    else:
+                                        sentence_timestamps.append((None, None))
+
                             segments = nlp_pipeline.process_transcript(
                                 transcript_text,
                                 existing_embeddings=cached_embeddings,
@@ -402,6 +432,7 @@ class LiveStreamManager:
                                 fast=fast,
                                 mmr_threshold=0.85,
                                 detailed=False,
+                                sentence_timestamps=sentence_timestamps,
                             )
                             if segments:
                                 hour_num = now.hour

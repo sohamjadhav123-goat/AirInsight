@@ -299,6 +299,7 @@ def process_transcript(
     detailed: bool = False,
     existing_texts: Optional[list[str]] = None,
     classifier: str = "zero-shot",
+    sentence_timestamps: Optional[list[tuple[Optional[float], Optional[float]]]] = None,
 ):
     """Run the full NLP pipeline on a transcript string.
 
@@ -311,6 +312,8 @@ def process_transcript(
         existing_texts: Corresponding texts for existing_embeddings.
         classifier: Backend selector — 'zero-shot' | 'fast' | 'finetuned'.
                     If 'finetuned' and model missing, falls back to 'fast'.
+        sentence_timestamps: Optional list of (audio_start, audio_end) tuples matching
+                             segmented sentences in order.
 
     Returns:
         segments list, or (segments, rejections) when detailed=True.
@@ -352,11 +355,18 @@ def process_transcript(
 
     segments = []
     for idx, (genre, confidence) in enumerate(genre_results):
+        orig_i = novel_indices[idx]
+        a_start, a_end = None, None
+        if sentence_timestamps and orig_i < len(sentence_timestamps):
+            a_start, a_end = sentence_timestamps[orig_i]
+
         segments.append({
             "text": novel_sentences[idx],
             "genre": genre,
             "genre_confidence": confidence,
             "embedding": novel_embeddings[idx],
+            "audio_start": a_start,
+            "audio_end": a_end,
         })
     return (segments, rejections) if detailed else segments
 

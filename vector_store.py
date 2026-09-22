@@ -47,7 +47,9 @@ CREATE TABLE IF NOT EXISTS segments (
     date TEXT,
     hour INTEGER,
     source_file TEXT,
-    indexed_at TEXT
+    indexed_at TEXT,
+    audio_start REAL,
+    audio_end REAL
 );
 """
 
@@ -57,6 +59,12 @@ def _get_db(db_path: str = SQLITE_DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute(CREATE_TABLE_SQL)
+    # Ensure audio_start and audio_end columns exist for backward compatibility
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(segments)").fetchall()]
+    if "audio_start" not in cols:
+        conn.execute("ALTER TABLE segments ADD COLUMN audio_start REAL")
+    if "audio_end" not in cols:
+        conn.execute("ALTER TABLE segments ADD COLUMN audio_end REAL")
     conn.commit()
     return conn
 
@@ -119,9 +127,20 @@ def add_segments(
     for i, seg in enumerate(segments):
         fid = start_id + i
         db.execute(
-            "INSERT INTO segments (faiss_id, text, genre, genre_confidence, date, hour, source_file, indexed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (fid, seg["text"], seg["genre"], seg["genre_confidence"], date, hour, source_file, now),
+            "INSERT INTO segments (faiss_id, text, genre, genre_confidence, date, hour, source_file, indexed_at, audio_start, audio_end) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                fid,
+                seg["text"],
+                seg["genre"],
+                seg["genre_confidence"],
+                date,
+                hour,
+                source_file,
+                now,
+                seg.get("audio_start"),
+                seg.get("audio_end"),
+            ),
         )
     db.commit()
     db.close()
@@ -132,33 +151,37 @@ def add_segments(
 
 
 def metadata_prefilter(
-    date_from: str,
-    date_to: str,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     genre: Optional[str] = None,
     db_path: str = SQLITE_DB_PATH,
 ) -> list[int]:
-    """Query SQLite for faiss_ids matching a date range and optional genre.
+    """Query SQLite for faiss_ids matching an optional date range and optional genre.
 
     Args:
-        date_from: Start date (YYYY-MM-DD), inclusive.
-        date_to: End date (YYYY-MM-DD), inclusive.
-        genre: Optional genre label to filter on.
+        date_from: Optional start date (YYYY-MM-DD), inclusive.
+        date_to: Optional end date (YYYY-MM-DD), inclusive.
+        genre: Optional genre label to filter on (case- and whitespace-insensitive).
         db_path: Path to the SQLite database.
 
     Returns:
         List of faiss_ids matching the criteria.
     """
     db = _get_db(db_path)
+    conditions = []
+    params = []
+    if date_from:
+        conditions.append("date >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("date <= ?")
+        params.append(date_to)
     if genre:
-        rows = db.execute(
-            "SELECT faiss_id FROM segments WHERE date >= ? AND date <= ? AND genre = ?",
-            (date_from, date_to, genre),
-        ).fetchall()
-    else:
-        rows = db.execute(
-            "SELECT faiss_id FROM segments WHERE date >= ? AND date <= ?",
-            (date_from, date_to),
-        ).fetchall()
+        conditions.append("LOWER(TRIM(genre)) = LOWER(TRIM(?))")
+        params.append(genre)
+
+    where_sql = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = db.execute(f"SELECT faiss_id FROM segments{where_sql}", params).fetchall()
     db.close()
     return [row["faiss_id"] for row in rows]
 
@@ -220,7 +243,7 @@ def semantic_search(
         if fid < 0:
             continue
         row = db.execute(
-            "SELECT text, genre, date, hour, source_file FROM segments WHERE faiss_id = ?", (int(fid),)
+            "SELECT text, genre, date, hour, source_file, audio_start, audio_end FROM segments WHERE faiss_id = ?", (int(fid),)
         ).fetchone()
         if row:
             source_file = row["source_file"] or ""
@@ -234,6 +257,8 @@ def semantic_search(
                 "faiss_id": int(fid),
                 "source_file": source_file,
                 "has_audio": bool(has_audio),
+                "audio_start": row["audio_start"] if "audio_start" in row.keys() else None,
+                "audio_end": row["audio_end"] if "audio_end" in row.keys() else None,
             })
     db.close()
     return results
