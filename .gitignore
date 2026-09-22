@@ -44,6 +44,13 @@ eval_labels.csv
 *.sqlite3
 *.db
 
+# Model Checkpoints & Large Weights
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
 # Media & Generated Scraping Artifacts
 output/audio/
 *.mp3

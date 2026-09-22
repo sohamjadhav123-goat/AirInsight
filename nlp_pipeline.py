@@ -7,6 +7,13 @@ segments ready for FAISS indexing.
 CLI usage:
   python nlp_pipeline.py --transcript output/text/2026-05-01/file.txt --date 2026-05-01 --hour 0800
   python nlp_pipeline.py --transcript ... --fast --mmr-threshold 0.90
+  python nlp_pipeline.py --transcript ... --classifier finetuned
+
+Classifier backends:
+  zero-shot  : facebook/bart-large-mnli (default, highest quality zero-shot)
+  fast       : cross-encoder/nli-MiniLM2-L6-H768 (lighter, --fast flag)
+  finetuned  : models/air-genre-classifier/ (DistilBERT fine-tuned on AIR corpus);
+               falls back to 'fast' with a WARNING if checkpoint not present.
 """
 
 import argparse
@@ -40,10 +47,12 @@ GENRE_LABELS = [
 DEFAULT_CLASSIFIER_MODEL = "facebook/bart-large-mnli"
 FAST_CLASSIFIER_MODEL = "cross-encoder/nli-MiniLM2-L6-H768"
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+FINETUNED_MODEL_PATH = os.path.join("models", "air-genre-classifier")
 DEFAULT_MMR_THRESHOLD = 0.85
 
 _classifier_pipeline = None
 _embedding_model = None
+_finetuned_classifier: Optional[tuple] = None  # (model, tokenizer, id2label) or None
 
 
 def segment_sentences(text: str) -> list[str]:
@@ -81,6 +90,112 @@ def classify_genres_batch(sentences: list[str], fast: bool = False) -> list[tupl
     if isinstance(results, dict):
         results = [results]
     return [(r["labels"][0], float(r["scores"][0])) for r in results]
+
+
+# ---------------------------------------------------------------------------
+# Fine-tuned classifier backend
+# ---------------------------------------------------------------------------
+
+def _get_finetuned_classifier() -> Optional[tuple]:
+    """Lazily load the fine-tuned genre classifier from FINETUNED_MODEL_PATH.
+
+    Returns (model, tokenizer, id2label) if the checkpoint exists, or None
+    if the checkpoint is missing (caller must fallback to zero-shot).
+    This mirrors the _probe_gemini() graceful-degradation pattern in rag_engine.py.
+    """
+    global _finetuned_classifier
+    if _finetuned_classifier is not None:
+        return _finetuned_classifier
+
+    if not os.path.isdir(FINETUNED_MODEL_PATH):
+        logger.warning(
+            "Fine-tuned model not found at '%s'. "
+            "Run 'python train_genre_classifier.py' to create it. "
+            "Falling back to zero-shot fast classifier.",
+            FINETUNED_MODEL_PATH,
+        )
+        return None
+
+    try:
+        import json
+        import torch
+        from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+        logger.info("Loading fine-tuned classifier from %s", FINETUNED_MODEL_PATH)
+        tokenizer = AutoTokenizer.from_pretrained(FINETUNED_MODEL_PATH)
+        model = AutoModelForSequenceClassification.from_pretrained(FINETUNED_MODEL_PATH)
+        model.eval()
+
+        # Load id2label from saved label_map.json (authoritative) or model config
+        label_map_path = os.path.join(FINETUNED_MODEL_PATH, "label_map.json")
+        if os.path.isfile(label_map_path):
+            with open(label_map_path, "r") as f:
+                data = json.load(f)
+            id2label = {int(k): v for k, v in data["id2label"].items()}
+        else:
+            id2label = {int(k): v for k, v in model.config.id2label.items()}
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = model.to(device)
+        _finetuned_classifier = (model, tokenizer, id2label, device)
+        logger.info("Fine-tuned classifier loaded (%d classes)", len(id2label))
+        return _finetuned_classifier
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to load fine-tuned classifier from '%s': %s. "
+            "Falling back to zero-shot fast classifier.",
+            FINETUNED_MODEL_PATH,
+            exc,
+        )
+        return None
+
+
+def classify_genres_batch_finetuned(
+    sentences: list[str],
+    max_len: int = 128,
+    batch_size: int = 32,
+) -> list[tuple[str, float]]:
+    """Classify sentences using the fine-tuned DistilBERT model.
+
+    Returns the exact same ``list[tuple[str, float]]`` shape as
+    ``classify_genres_batch()`` so all downstream callers are unchanged.
+
+    If the fine-tuned model is unavailable, transparently falls back to the
+    zero-shot fast model and logs a WARNING — no exception is raised.
+    """
+    if not sentences:
+        return []
+
+    classifier = _get_finetuned_classifier()
+    if classifier is None:
+        # Graceful degradation: fall back to zero-shot fast
+        return classify_genres_batch(sentences, fast=True)
+
+    import torch
+    model, tokenizer, id2label, device = classifier
+
+    results: list[tuple[str, float]] = []
+    with torch.no_grad():
+        for start in range(0, len(sentences), batch_size):
+            batch = sentences[start: start + batch_size]
+            enc = tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=max_len,
+                return_tensors="pt",
+            )
+            input_ids = enc["input_ids"].to(device)
+            attention_mask = enc["attention_mask"].to(device)
+            logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+            probs = torch.softmax(logits, dim=-1)
+            top_probs, top_ids = probs.max(dim=-1)
+            for pid, pconf in zip(top_ids.cpu().tolist(), top_probs.cpu().tolist()):
+                label = id2label.get(pid, GENRE_LABELS[-1])  # fallback to "Other"
+                results.append((label, float(pconf)))
+
+    return results
 
 
 def _get_embedding_model():
@@ -183,12 +298,27 @@ def process_transcript(
     mmr_threshold: float = DEFAULT_MMR_THRESHOLD,
     detailed: bool = False,
     existing_texts: Optional[list[str]] = None,
+    classifier: str = "zero-shot",
 ):
     """Run the full NLP pipeline on a transcript string.
 
-    If detailed=True, returns (segments, rejections).
-    Otherwise returns segments list.
+    Args:
+        text: Raw transcript text.
+        existing_embeddings: Embeddings already in FAISS for MMR dedup.
+        fast: If True, equivalent to classifier='fast' (backward compat).
+        mmr_threshold: Cosine similarity threshold for novelty gate.
+        detailed: If True, returns (segments, rejections).
+        existing_texts: Corresponding texts for existing_embeddings.
+        classifier: Backend selector — 'zero-shot' | 'fast' | 'finetuned'.
+                    If 'finetuned' and model missing, falls back to 'fast'.
+
+    Returns:
+        segments list, or (segments, rejections) when detailed=True.
     """
+    # Backward compat: --fast flag maps to classifier='fast'
+    if fast and classifier == "zero-shot":
+        classifier = "fast"
+
     sentences = segment_sentences(text)
     logger.info("Segmented transcript into %d sentences", len(sentences))
     if not sentences:
@@ -210,8 +340,15 @@ def process_transcript(
 
     novel_sentences = [sentences[i] for i in novel_indices]
     novel_embeddings = embeddings[novel_indices]
-    logger.info("Classifying %d novel sentences...", len(novel_sentences))
-    genre_results = classify_genres_batch(novel_sentences, fast=fast)
+    logger.info("Classifying %d novel sentences (backend=%s)...", len(novel_sentences), classifier)
+
+    if classifier == "finetuned":
+        genre_results = classify_genres_batch_finetuned(novel_sentences)
+    elif classifier == "fast":
+        genre_results = classify_genres_batch(novel_sentences, fast=True)
+    else:
+        # "zero-shot" default
+        genre_results = classify_genres_batch(novel_sentences, fast=False)
 
     segments = []
     for idx, (genre, confidence) in enumerate(genre_results):
@@ -230,10 +367,22 @@ def main() -> int:
     parser.add_argument("--transcript", required=True, help="Path to transcript .txt file")
     parser.add_argument("--date", required=True, help="Broadcast date YYYY-MM-DD")
     parser.add_argument("--hour", required=True, type=int, help="Broadcast hour e.g. 0800")
-    parser.add_argument("--fast", action="store_true", help="Use lighter classifier model")
+    parser.add_argument("--fast", action="store_true",
+                        help="Use lighter classifier model (shorthand for --classifier fast)")
+    parser.add_argument(
+        "--classifier",
+        choices=["zero-shot", "fast", "finetuned"],
+        default="zero-shot",
+        help="Classifier backend: zero-shot (default), fast, or finetuned",
+    )
     parser.add_argument("--mmr-threshold", type=float, default=DEFAULT_MMR_THRESHOLD,
                         help=f"Cosine sim threshold for dedup (default {DEFAULT_MMR_THRESHOLD})")
     args = parser.parse_args()
+
+    # --fast overrides --classifier for backward compat
+    classifier = args.classifier
+    if args.fast:
+        classifier = "fast"
 
     if not os.path.isfile(args.transcript):
         logger.error("Transcript file not found: %s", args.transcript)
@@ -254,8 +403,13 @@ def main() -> int:
     except Exception:
         logger.info("No existing FAISS index found - starting fresh")
 
-    segments = process_transcript(text, existing_embeddings=existing_embeddings,
-                                  fast=args.fast, mmr_threshold=args.mmr_threshold)
+    segments = process_transcript(
+        text,
+        existing_embeddings=existing_embeddings,
+        fast=args.fast,
+        mmr_threshold=args.mmr_threshold,
+        classifier=classifier,
+    )
     logger.info("Pipeline complete: %d novel segments produced", len(segments))
     for seg in segments:
         print(json.dumps({

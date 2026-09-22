@@ -28,6 +28,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
+from live_stream_ingest import live_manager
 import rag_engine
 import vector_store
 
@@ -57,6 +58,22 @@ class ChatResponse(BaseModel):
     sources: list[dict]
     filters: dict
     session_id: str
+
+
+class StreamStartRequest(BaseModel):
+    """Live stream start request."""
+    url: str
+    language: str = "english"
+    chunk_seconds: int = 30
+    overlap_seconds: int = 5
+    fast: bool = True
+    transcriber: str = "faster-whisper"
+    model: str = "base"
+
+
+class StreamStopRequest(BaseModel):
+    """Live stream stop request."""
+    stream_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +188,53 @@ async def get_audio(faiss_id: int):
     )
 
 
+@app.post("/stream/start")
+async def stream_start(req: StreamStartRequest):
+    """Launch real-time radio stream transcription loop in background thread."""
+    status = live_manager.get_status()
+    if status["running"]:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"A stream is already active with ID '{live_manager.stream_id}'. Stop it first."}
+        )
+    try:
+        sid = live_manager.start(
+            url=req.url,
+            language=req.language,
+            chunk_seconds=req.chunk_seconds,
+            overlap_seconds=req.overlap_seconds,
+            fast=req.fast,
+            transcriber=req.transcriber,
+            model=req.model,
+        )
+        return {"stream_id": sid, "status": "started", "url": req.url}
+    except RuntimeError as err:
+        return JSONResponse(status_code=400, content={"error": str(err)})
+    except Exception as err:
+        logger.error("Failed to start stream: %s", err)
+        return JSONResponse(status_code=500, content={"error": str(err)})
+
+
+@app.post("/stream/stop")
+async def stream_stop(req: Optional[StreamStopRequest] = None):
+    """Cleanly stop the active live stream, flushing the current audio buffer."""
+    sid = req.stream_id if req else None
+    try:
+        res = live_manager.stop(stream_id=sid)
+        return res
+    except ValueError as err:
+        return JSONResponse(status_code=400, content={"error": str(err)})
+    except Exception as err:
+        logger.error("Failed to stop stream: %s", err)
+        return JSONResponse(status_code=500, content={"error": str(err)})
+
+
+@app.get("/stream/status")
+async def stream_status():
+    """Return status of live stream transcription."""
+    return live_manager.get_status()
+
+
 @app.get("/", response_class=HTMLResponse)
 async def ui():
     """Serve the chatbot web UI."""
@@ -247,13 +311,47 @@ CHAT_HTML = """<!DOCTYPE html>
   .header p { font-size: 12px; color: var(--text-secondary); }
   .status-dot {
     width: 8px; height: 8px; border-radius: 50%;
-    background: var(--success); margin-left: auto;
+    background: var(--success);
     box-shadow: 0 0 8px var(--success);
     animation: pulse 2s infinite;
   }
   @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.5; }
+  }
+
+  .live-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    transition: all 0.3s ease;
+    user-select: none;
+  }
+  .live-pill.active {
+    background: rgba(63, 185, 80, 0.15);
+    border-color: var(--success);
+    color: var(--success);
+    box-shadow: 0 0 10px rgba(63, 185, 80, 0.3);
+    animation: livePillPulse 2s infinite ease-in-out;
+  }
+  .live-pill-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  @keyframes livePillPulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.75; transform: scale(0.97); }
   }
 
   /* Chat area */
@@ -476,7 +574,12 @@ CHAT_HTML = """<!DOCTYPE html>
       </details>
     </div>
   </div>
-  <div class="status-dot" title="System online"></div>
+  <div style="display: flex; align-items: center; gap: 10px; margin-left: auto;">
+    <div id="livePill" class="live-pill" title="Live stream: Idle">
+      <span class="live-pill-dot"></span>LIVE
+    </div>
+    <div class="status-dot" title="System online"></div>
+  </div>
 </div>
 
 <div class="chat-container" id="chatBox">
@@ -803,6 +906,26 @@ async function loadDedupStats() {
   }
 }
 loadDedupStats();
+
+async function checkStreamStatus() {
+  try {
+    const res = await fetch('/stream/status');
+    const data = await res.json();
+    const pill = document.getElementById('livePill');
+    if (!pill) return;
+    if (data && data.running) {
+      pill.classList.add('active');
+      pill.title = `Live streaming active\nURL: ${data.url || 'Active stream'}\nSegments ingested: ${data.segments_ingested}`;
+    } else {
+      pill.classList.remove('active');
+      pill.title = 'Live stream: Idle';
+    }
+  } catch (err) {
+    console.debug('Stream status check failed', err);
+  }
+}
+setInterval(checkStreamStatus, 5000);
+checkStreamStatus();
 </script>
 </body>
 </html>"""

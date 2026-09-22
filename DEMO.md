@@ -107,11 +107,72 @@ To demonstrate that the system **never** silently performs global search when a 
 - **Demo Safety & Graceful Degradation:**
   - If `output/audio` is deleted or missing, the system does not crash or throw errors: `/chat` and `/timeline` seamlessly return `has_audio: false`, and audio buttons are cleanly hidden in the UI.
 
+### E. Live Streaming & Real-Time Ingestion
+- **What it demonstrates:** Continuous transcription of live radio streams (Icecast MP3 / HLS) via rolling PCM ffmpeg decoding, faster-whisper VAD, MMR deduplication, and immediate indexing into FAISS + SQLite.
+- **Standalone CLI Command:**
+  ```bash
+  python live_stream_ingest.py --url "http://air-stream-url.example/live.mp3" --chunk-seconds 30 --overlap-seconds 5 --fast
+  ```
+- **REST Endpoints & curl Examples:**
+  1. **Start Stream:**
+     ```bash
+     curl -X POST http://localhost:8000/stream/start \
+       -H "Content-Type: application/json" \
+       -d '{"url": "http://air-stream-url.example/live.mp3", "language": "english", "chunk_seconds": 30}'
+     ```
+     *Response:*
+     ```json
+     {"stream_id": "a1b2c3d4", "status": "started", "url": "http://air-stream-url.example/live.mp3"}
+     ```
+
+  2. **Check Stream Status:**
+     ```bash
+     curl http://localhost:8000/stream/status
+     ```
+     *Response:*
+     ```json
+     {
+       "running": true,
+       "url": "http://air-stream-url.example/live.mp3",
+       "started_at": "2026-09-22T14:30:00Z",
+       "segments_ingested": 4,
+       "last_chunk_at": "2026-09-22T14:31:00Z"
+     }
+     ```
+
+  3. **Stop Stream (Clean Buffer Flush):**
+     ```bash
+     curl -X POST http://localhost:8000/stream/stop \
+       -H "Content-Type: application/json" \
+       -d '{}'
+     ```
+     *Response:*
+     ```json
+     {"status": "stopped", "stream_id": "a1b2c3d4"}
+     ```
+
+- **UI LIVE Pill:**
+  - Located in the header next to the status dot.
+  - Automatically polls `/stream/status` every ~5s.
+  - Glows and pulses green when an active stream is running, updating its tooltip with stream URL and ingested segment count.
+
 ---
 
 ## 5. Architecture Defense Q&A
 
-**Question:** *"Why is the classifier zero-shot instead of fine-tuned?"*
+**Question:** *"Why was zero-shot the initial choice, and when should you switch to the fine-tuned model?"*
+
+**Answer — Why zero-shot first:**
+> Zero-shot NLI (BART-large-MNLI / MiniLM NLI) generalises directly from entailment pretraining without requiring any labeled AIR-domain data. At project inception no labeled corpus existed, so zero-shot was the only principled option. Committing to a fine-tuned model without labeled data would have introduced silent label noise with no way to measure it — a risk explicitly identified in `DEMO.md` and `build_genre_training_data.py`. This matches the project-wide graceful degradation philosophy: use the best available capability, not the most complex one.
+
+**Answer — When to switch to fine-tuned:**
+> The fine-tuned DistilBERT classifier (`models/air-genre-classifier/`) should be preferred when **both** conditions are met:
+> 1. **Corpus size**: at least ~100 human-reviewed training examples per class (1,000 rows total across 10 genres), obtainable by running `python build_genre_training_data.py --augment` and filling the `true_genre` column.
+> 2. **Measured accuracy gain**: `python eval_genre.py --compare` shows a delta of **+5 pp or more** over zero-shot on a held-out `eval_labels.csv` set. Below that threshold the improvement is within noise and does not justify the inference overhead.
+>
+> The fine-tuned path is a **selectable backend** (`--classifier finetuned`), not a replacement. If the checkpoint is absent, the system automatically falls back to zero-shot fast — the same graceful degradation pattern used for the Gemini LIVE/FALLBACK probe in `rag_engine.py`.
+
+**Question:** *"What domain terms does zero-shot miss?"*
 
 **Answer:**
-> **"No labelled training data exists for AIR news genres; zero-shot NLI models generalise from entailment pretraining without requiring domain-specific labels."**
+> Zero-shot NLI struggles with opaque domain tokens like **"Rajya Sabha"** (misclassified as Society rather than Politics), **"ISRO"** (sometimes Economy or Other), and **"repo rate"** (sometimes International). The fine-tuned model learns these associations directly from AIR corpus examples. `build_genre_training_data.py --augment` pre-seeds the training set with template sentences combining these keywords to bootstrap underrepresented classes.

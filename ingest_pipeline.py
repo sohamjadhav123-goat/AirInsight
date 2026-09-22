@@ -71,20 +71,28 @@ def run(
     fast: bool = False,
     mmr_threshold: float = 0.85,
     metadata_csv: str = METADATA_CSV,
+    classifier: str = "zero-shot",
 ) -> dict:
     """Run the full ingestion pipeline.
 
     Args:
         reindex: If True, wipe the vector store and reprocess everything.
-        fast: Use the lightweight NLP classifier.
+        fast: Use the lightweight NLP classifier (shorthand for classifier='fast').
         mmr_threshold: MMR cosine similarity threshold for deduplication.
         metadata_csv: Path to the metadata CSV.
+        classifier: Classifier backend -- 'zero-shot' | 'fast' | 'finetuned'.
+                    --fast flag maps to 'fast' for backward compatibility.
 
     Returns:
         Summary dict: files_processed, segments_added, duplicates_filtered.
     """
     import vector_store
     from nlp_pipeline import process_transcript
+
+    # Backward compat: --fast maps to classifier='fast'
+    if fast and classifier == "zero-shot":
+        classifier = "fast"
+    logger.info("Classifier backend: %s", classifier)
 
     if reindex:
         logger.info("REINDEX mode: wiping existing FAISS index and SQLite DB")
@@ -144,6 +152,7 @@ def run(
             fast=fast,
             mmr_threshold=mmr_threshold,
             detailed=True,
+            classifier=classifier,
         )
 
         from nlp_pipeline import segment_sentences
@@ -211,7 +220,13 @@ def main() -> int:
     parser.add_argument("--reindex", action="store_true",
                         help="Wipe FAISS + DB and reindex everything")
     parser.add_argument("--fast", action="store_true",
-                        help="Use lighter NLP classifier model")
+                        help="Use lighter NLP classifier model (shorthand for --classifier fast)")
+    parser.add_argument(
+        "--classifier",
+        choices=["zero-shot", "fast", "finetuned"],
+        default="zero-shot",
+        help="Classifier backend: zero-shot (default), fast, or finetuned",
+    )
     parser.add_argument("--mmr-threshold", type=float, default=0.85,
                         help="MMR cosine similarity threshold (default 0.85)")
     parser.add_argument("--csv", default=METADATA_CSV,
@@ -223,6 +238,7 @@ def main() -> int:
         fast=args.fast,
         mmr_threshold=args.mmr_threshold,
         metadata_csv=args.csv,
+        classifier=args.classifier,
     )
     print(f"\n{'='*50}")
     print(f"  Files processed:     {summary['files_processed']}")
