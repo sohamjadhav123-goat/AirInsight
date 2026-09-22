@@ -10,13 +10,13 @@ AI-powered broadcast news intelligence system for All India Radio (AIR). Feature
 | | User-Agent rotation & robots.txt check | ✅ Implemented | Random UA rotation and automated robots.txt compliance check |
 | | Immediate CSV append on download | ✅ Implemented | Writes metadata row immediately per downloaded bulletin |
 | **ASR Transcription** | Whisper / faster-whisper integration | ✅ Implemented | Local CPU/CUDA transcription with text output |
-| | Real-time audio stream transcription | ⏳ Not Yet | Phase 2 target (live radio stream decoding) |
+| | Real-time audio stream transcription | ✅ Implemented | Phase 2 target (live radio stream decoding) |
 | **NLP Pipeline** | Sentence segmentation | ✅ Implemented | NLTK punkt tokenizer with BOM stripping |
 | | Dense Sentence Embeddings | ✅ Implemented | `all-MiniLM-L6-v2` (384-dim) normalized embeddings |
 | | MMR Novelty Gate Deduplication | ✅ Implemented | Streaming cosine-similarity thresholding (0.85) |
 | | Deduplication Reporting | ✅ Implemented | Full JSON report (`dedup_report.json`) & `/dedup` endpoint |
 | | Zero-shot Genre Classification | ✅ Implemented | `cross-encoder/nli-MiniLM2-L6-H768` (fast) / `bart-large-mnli` |
-| | Domain Fine-tuned Classifier | ⏳ Not Yet | Future work (pending labeled AIR news corpus) |
+| | Domain Fine-tuned Classifier | ✅ Implemented  | Future work (pending labeled AIR news corpus) |
 | **Storage & Retrieval** | FAISS Vector Store | ✅ Implemented | `IndexFlatIP` cosine index (`vector_store.py`) |
 | | SQLite Metadata Store | ✅ Implemented | `news_store.db` with date, hour, genre, source indexing |
 | | Two-Tier RAG Prefilter | ✅ Implemented | SQLite date/genre SQL prefilter before FAISS search |
