@@ -1,4 +1,4 @@
-# VaniStream — AIR News Intelligence System
+# AirInsight— AIR News Intelligence System
 
 AI-powered broadcast news intelligence system for All India Radio (AIR). Features automated audio scraping, Whisper transcription, streaming MMR novelty deduplication, zero-shot NLI genre classification, FAISS vector search with SQLite metadata pre-filtering, and Google Gemini RAG generation.
 
